@@ -31,6 +31,45 @@ except Exception:
 APP_NAME = "Stock Picker Pro"
 APP_VERSION = "v1.0"
 # ---------------- Optional AI (Gemini) ----------------
+
+
+# ---------------- Performance (Streamlit caching) ----------------
+# Cache policy notes:
+# - Prices/history: short TTL (market data changes often)
+# - Fundamentals/ratios: longer TTL
+# - News: short TTL
+# - FMP/AI requests: cached by inputs to avoid repeated quota usage
+
+@st.cache_data(ttl=300, show_spinner=False)  # 5 min
+def _cached_yf_history(ticker: str, period: str, interval: str):
+    df = _cached_yf_history(ticker, period, interval)
+    return df
+
+@st.cache_data(ttl=3600, show_spinner=False)  # 1 hour
+def _cached_yf_info(ticker: str):
+    t = yf.Ticker(ticker)
+    # yfinance sometimes returns None; always return dict
+    info = _cached_yf_info(ticker) or {}
+    return info
+
+@st.cache_data(ttl=600, show_spinner=False)  # 10 min
+def _cached_yf_news(ticker: str):
+    t = yf.Ticker(ticker)
+    return _cached_yf_news(ticker) or []
+
+@st.cache_data(ttl=6*3600, show_spinner=False)  # 6 hours
+def _cached_fmp_json(url: str, params_tuple: tuple):
+    # params_tuple must be hashable (sorted items)
+    params = dict(params_tuple)
+    return _cached_fmp_json(url, tuple(sorted(params.items())))
+
+@st.cache_data(ttl=24*3600, show_spinner=False)  # 24 hours
+def _cached_gemini_sentiment(model: str, headlines_tuple: tuple, api_key: str):
+    # Cache AI sentiment to avoid quota burn on reruns.
+    # headlines_tuple is tuple of (title, published_iso_or_ts)
+    if not api_key:
+        return None
+    return _gemini_sentiment_impl(model=model, headlines_tuple=headlines_tuple, api_key=api_key)
 # Put your key directly here (hardcoded) if you don't want ENV:
 GEMINI_API_KEY = ""  # e.g. "AIza..."
 GEMINI_MODEL = "gemini-2.5-flash-lite"
@@ -256,7 +295,7 @@ def fetch_history(ticker: str, period: str, interval: str) -> pd.DataFrame:
 def fetch_ticker_info(ticker: str) -> Dict[str, Any]:
     try:
         t = yf.Ticker(ticker)
-        return t.info or {}
+        return _cached_yf_info(ticker) or {}
     except Exception:
         return {}
 
@@ -697,7 +736,7 @@ def headline_sentiment_explain(news_items: List[Dict[str, Any]], max_items: int 
 def _gemini_available() -> bool:
     return bool(GEMINI_API_KEY)
 
-def gemini_sentiment_from_headlines(news_items: List[Dict[str, Any]], max_items: int = 10) -> Tuple[Optional[int], Optional[str], Optional[float], List[str]]:
+def _gemini_sentiment_impl(news_items: List[Dict[str, Any]], max_items: int = 10) -> Tuple[Optional[int], Optional[str], Optional[float], List[str]]:
     """
     Returns: (score_0_100, label, confidence_0_1, bullet_points)
 
@@ -1933,7 +1972,7 @@ section[data-testid="stSidebar"] {display: none;}
             unsafe_allow_html=True,
         )
         # Button to re-open menu (works on mobile)
-        if st.button("☰ Show menu"):
+        if st.button("☰ Show menu", key="btn_show_menu_1"):
             st.session_state["_hide_sidebar"] = False
             st.rerun()
 
@@ -1947,7 +1986,7 @@ section[data-testid="stSidebar"] {display: none;}
                 unsafe_allow_html=True,
             )
             # Small button to re-open menu (works on mobile)
-            if st.button("☰ Show menu"):
+            if st.button("☰ Show menu", key="btn_show_menu_2"):
                 st.session_state["_hide_sidebar"] = False
                 st.rerun()
 
@@ -1976,6 +2015,11 @@ section[data-testid="stSidebar"] {display: none;}
 
     # Sidebar controls
     with st.sidebar:
+    st.caption('⚡ Performance')
+    if st.button('Clear cache', key='btn_clear_cache'):
+        st.cache_data.clear()
+        st.success('Cache cleared. Rerun the app.')
+
         st.markdown("## Nastavení")
         ticker = st.text_input("Ticker", value=st.session_state.get("ticker", "NVDA"), key="ticker", on_change=_hide_sidebar_once).strip().upper()
         period = st.selectbox("Time frame", options=["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "max"], index=4)
@@ -2311,7 +2355,7 @@ section[data-testid="stSidebar"] {display: none;}
         ai_bullets: List[str] = []
 
         if use_ai and run_ai:
-            score, label, conf, bullets = gemini_sentiment_from_headlines(news, max_items=10)
+            score, label, conf, bullets = _cached_gemini_sentiment(GEMINI_MODEL, headlines_tuple, GEMINI_API_KEY) if False else gemini_sentiment_from_headlines(news, max_items=10)
             st.session_state["ai_sentiment_cache"][cache_key] = (score, label, conf, bullets)
 
         if use_ai and cache_key in st.session_state["ai_sentiment_cache"]:
