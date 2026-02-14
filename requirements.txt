@@ -1,7 +1,12 @@
-streamlit
-yfinance
-pandas
-numpy
-plotly
-requests
-google-genai
+streamlit>=1.41
+pandas>=2.2
+numpy>=1.26
+requests>=2.31
+plotly>=5.22
+yfinance>=0.2.43
+
+# AI (Gemini) – nové SDK
+google-genai>=0.3.0
+
+# Optional (jen pokud někde používáš dateutil parser)
+python-dateutil>=2.9
