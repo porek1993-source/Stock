@@ -2013,34 +2013,57 @@ section[data-testid="stSidebar"] {display: none;}
 
     st.markdown(f"# 📊 {APP_NAME} {APP_VERSION}")
 
+        # Sidebar controls
     # Sidebar controls
     with st.sidebar:
-    st.caption('⚡ Performance')
-    if st.button('Clear cache', key='btn_clear_cache'):
-        st.cache_data.clear()
-        st.success('Cache cleared. Rerun the app.')
+        st.caption("⚡ Performance")
+        if st.button("Clear cache", key="btn_clear_cache"):
+            st.cache_data.clear()
+            st.success("Cache cleared. Rerun the app.")
 
         st.markdown("## Nastavení")
-        ticker = st.text_input("Ticker", value=st.session_state.get("ticker", "NVDA"), key="ticker", on_change=_hide_sidebar_once).strip().upper()
-        period = st.selectbox("Time frame", options=["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "max"], index=4)
-        interval = st.selectbox("Interval", options=["5m", "15m", "30m", "1h", "1d", "1wk"], index=["5m","15m","30m","1h","1d","1wk"].index(pick_interval(period)))
+
+        def _on_ticker_change():
+            raw = st.session_state.get("ticker_input", "")
+            st.session_state["ticker"] = (raw or "").strip().upper() or "NVDA"
+            _hide_sidebar_once()
+
+        st.text_input(
+            "Ticker",
+            value=st.session_state.get("ticker_input", st.session_state.get("ticker", "NVDA")),
+            key="ticker_input",
+            on_change=_on_ticker_change,
+        )
+        ticker = st.session_state.get("ticker", "NVDA")
+
+        period = st.selectbox(
+            "Time frame",
+            options=["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "max"],
+            index=4,
+        )
+        interval = st.selectbox(
+            "Interval",
+            options=["5m", "15m", "30m", "1h", "1d", "1wk"],
+            index=["5m","15m","30m","1h","1d","1wk"].index(pick_interval(period)),
+        )
+
         st.markdown("---")
         show_debug = st.checkbox("Zobrazit debug info", value=False)
         st.caption("Tip: delší time frame = stabilnější obrázek; kratší = lepší pro timing.")
 
-    if not ticker:
-        st.info("Zadej ticker.")
-        return
+        if not ticker:
+            st.info("Zadej ticker.")
+            return
 
-    # Fetch core data
-    info = fetch_ticker_info(ticker)
-    objects = fetch_ticker_objects(ticker)
-    hist = fetch_history(ticker, period=period, interval=interval)
+        # Fetch core data
+        info = fetch_ticker_info(ticker)
+        objects = fetch_ticker_objects(ticker)
+        hist = fetch_history(ticker, period=period, interval=interval)
 
-    metrics = compute_metrics(ticker, info, objects)
-    # Optional: enrich missing ratios with FMP (if FMP_API_KEY is set)
-    metrics, fmp_notes = enrich_metrics_with_fmp(ticker, metrics)
-    company = info.get("longName") or info.get("shortName") or ticker
+        metrics = compute_metrics(ticker, info, objects)
+        # Optional: enrich missing ratios with FMP (if FMP_API_KEY is set)
+        metrics, fmp_notes = enrich_metrics_with_fmp(ticker, metrics)
+        company = info.get("longName") or info.get("shortName") or ticker
 
     # DCF inputs
     with st.sidebar:
