@@ -1002,26 +1002,13 @@ def get_advanced_verdict(
 
 
 def render_twitter_timeline(handle: str, height: int = 600) -> None:
-    """Render X/Twitter timeline embed without API keys."""
+    """Render X/Twitter content without embeds (widgets are often blocked)."""
     handle = (handle or "").lstrip("@").strip()
     if not handle:
         st.info("Vyber guru účet.")
         return
-
-    html = f"""
-    <div style="width:100%; height:{height}px; overflow:hidden;">
-      <a class="twitter-timeline"
-         data-theme="dark"
-         data-dnt="true"
-         data-height="{height}"
-         href="https://twitter.com/{handle}?ref_src=twsrc%5Etfw">
-        Tweets by @{handle}
-      </a>
-    </div>
-    <script async src="https://platform.twitter.com/widgets.js" charset="utf-8"></script>
-    """
-    # Give the component a bit more room than the widget height
-    components.html(html, height=height + 50)
+    st.warning("⚠️ X (Twitter) často blokuje náhledy v cizích aplikacích. Použij přímý odkaz níže.")
+    st.markdown(f"👉 Otevřít profil **@{handle}**: https://twitter.com/{handle}")
 
 def analyze_social_text_with_gemini(text: str) -> str:
     """Analyze manually pasted tweet/comment using Gemini."""
@@ -1272,10 +1259,38 @@ def main():
         implied_growth = None
         
         if fcf and shares and fcf > 0:
-            fair_value_dcf = calculate_dcf_fair_value(
-                fcf, dcf_growth, dcf_terminal, dcf_wacc, dcf_years, shares
-            )
-            if fair_value_dcf and current_price:
+            # --- NOVÝ VÝPOČET DCF (Exit Multiple Metoda) ---
+            # 1. Spočítáme budoucí FCF pro každý rok
+            future_fcf = []
+            current_fcf = fcf
+            
+            # Diskontní faktor
+            discount_factors = [(1 + dcf_wacc) ** i for i in range(1, dcf_years + 1)]
+            
+            for i in range(dcf_years):
+                current_fcf = current_fcf * (1 + dcf_growth)
+                future_fcf.append(current_fcf)
+            
+            # 2. Terminal Value (Hodnota na konci 5. roku)
+            # Použijeme Exit Multiple (pro Big Tech standardně 25x, ne konzervativní Gordon)
+            exit_multiple = 25.0
+            terminal_value = future_fcf[-1] * exit_multiple
+            
+            # 3. Diskontování na dnešní hodnotu (PV)
+            pv_cash_flows = sum([f / d for f, d in zip(future_fcf, discount_factors)])
+            pv_terminal_value = terminal_value / ((1 + dcf_wacc) ** dcf_years)
+            
+            enterprise_value = pv_cash_flows + pv_terminal_value
+            
+            # 4. Equity Value (EV + Cash - Debt)
+            total_cash = safe_float(info.get('totalCash')) or 0
+            total_debt = safe_float(info.get('totalDebt')) or 0
+            equity_value = enterprise_value + total_cash - total_debt
+            
+            fair_value_dcf = equity_value / shares
+            
+            # Přepočet MOS a Implied Growth
+            if current_price:
                 mos_dcf = (fair_value_dcf / current_price) - 1.0
                 implied_growth = reverse_dcf_implied_growth(
                     current_price, fcf, dcf_terminal, dcf_wacc, dcf_years, shares
@@ -1974,9 +1989,42 @@ def main():
 
         with right:
             st.markdown(f"### 🐦 Timeline: {name or '—'}")
-            render_twitter_timeline(handle, height=600)
+            guru_handle = handle
+            st.markdown("### 📡 Přímý přenos")
+            st.warning("⚠️ X (Twitter) blokuje náhledy v cizích aplikacích. Použij přímý odkaz níže.")
+            st.markdown(f"""
+            <div style="
+                padding: 20px; 
+                border-radius: 12px; 
+                border: 1px solid rgba(255,255,255,0.1); 
+                background: linear-gradient(135deg, rgba(29,161,242,0.1) 0%, rgba(0,0,0,0) 100%);
+                text-align: center;
+            ">
+                <div style="font-size: 50px; margin-bottom: 10px;">🐦</div>
+                <h3>@{guru_handle}</h3>
+                <p>Klikni pro zobrazení nejnovějších analýz a komentářů přímo na X.</p>
+                <a href="https://twitter.com/{guru_handle}" target="_blank" style="text-decoration: none;">
+                    <button style="background-color: #1DA1F2; color: white; border: none; padding: 10px 20px; border-radius: 20px; font-weight: bold; cursor: pointer;">
+                        Otevřít profil @{guru_handle} ↗
+                    </button>
+                </a>
+                <br><br>
+                <div style="text-align: left; font-size: 0.8em; opacity: 0.7;">
+                    <strong>Tip:</strong> Otevři profil, najdi zajímavý tweet, zkopíruj text a vlož ho vlevo do AI analýzy.
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            st.markdown("---")
+            st.markdown(f"#### 🔎 Hledat **${ticker}** na X")
+            st.markdown(f"""
+                <a href="https://twitter.com/search?q=%24{ticker}&src=typed_query&f=top" target="_blank">
+                    <button style="background: transparent; border: 1px solid #1DA1F2; color: #1DA1F2; padding: 5px 15px; border-radius: 15px; cursor: pointer;">
+                        Nejlepší tweety o ${ticker} ↗
+                    </button>
+                </a>
+            """, unsafe_allow_html=True)
 
-            st.markdown("### 🧠 AI Analýza Tweetu")
             social_text = st.text_area(
                 "Vlož text tweetu nebo komentáře k analýze",
                 height=140,
