@@ -29,7 +29,7 @@ import streamlit.components.v1 as components
 # Streamlit page config MUST be the first Streamlit command
 # NOTE: We must not call any Streamlit APIs (including st.session_state) before set_page_config,
 # otherwise Streamlit may raise an error. We persist the desired sidebar state via an env var
-# and then mirror it into st.session_state after configuration.
+# Sidebar state: keep st.set_page_config as the first Streamlit call.
 _SIDEBAR_STATE = os.environ.get("STOCK_PICKER_SIDEBAR_STATE", "expanded")
 if _SIDEBAR_STATE not in ("expanded", "collapsed", "auto"):
     _SIDEBAR_STATE = "expanded"
@@ -41,9 +41,11 @@ st.set_page_config(
     initial_sidebar_state=_SIDEBAR_STATE,
 )
 
-# Initialize sidebar state in session_state (after set_page_config to keep config first)
+# Session-state mirrors (safe to touch after set_page_config)
 if "sidebar_state" not in st.session_state:
     st.session_state.sidebar_state = _SIDEBAR_STATE
+if "close_sidebar_now" not in st.session_state:
+    st.session_state.close_sidebar_now = False
 
 
 # --- Secrets / API keys (Streamlit Cloud: use Secrets) ---
@@ -1460,9 +1462,9 @@ def main():
         
         def close_sidebar():
             st.session_state.sidebar_state = "collapsed"
+            st.session_state.close_sidebar_now = True
             os.environ["STOCK_PICKER_SIDEBAR_STATE"] = "collapsed"
-
-        analyze_btn = st.button(
+analyze_btn = st.button(
             "🔍 Analyzovat",
             type="primary",
             use_container_width=True,
@@ -1532,6 +1534,45 @@ def main():
     # MAIN CONTENT
     # ========================================================================
     
+
+
+# Force-close mobile sidebar drawer after clicking Analyze
+if st.session_state.get("close_sidebar_now"):
+    components.html(
+        """
+        <script>
+        (function() {
+          function tryClose() {
+            const candidates = [
+              'button[aria-label="Close sidebar"]',
+              'button[title="Close sidebar"]',
+              'button[data-testid="stSidebarCollapseButton"]',
+              'button[data-testid="stSidebarToggleButton"]',
+              'button[aria-label="Toggle sidebar"]'
+            ];
+            for (const sel of candidates) {
+              const btn = document.querySelector(sel);
+              if (btn) { btn.click(); return true; }
+            }
+            const header = document.querySelector('header');
+            if (header) {
+              const b = header.querySelector('button');
+              if (b) { b.click(); return true; }
+            }
+            return false;
+          }
+          let attempts = 0;
+          const timer = setInterval(() => {
+            attempts++;
+            if (tryClose() || attempts > 12) clearInterval(timer);
+          }, 120);
+        })();
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+    st.session_state.close_sidebar_now = False
 
 # Welcome screen if no analysis yet
     if not analyze_btn and "last_ticker" not in st.session_state:
