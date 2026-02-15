@@ -1,0 +1,25 @@
+[theme]
+# Pevná barva pozadí sidebaru (není průhledná)
+primaryColor="#FF4B4B"
+backgroundColor="#0E1117"
+secondaryBackgroundColor="#262730"
+textColor="#FAFAFA"
+font="sans serif"
+
+[server]
+# Lepší headless mode pro mobile
+headless = false
+runOnSave = true
+port = 8501
+
+[browser]
+# Lepší mobile experience
+gatherUsageStats = false
+serverAddress = "localhost"
+
+[runner]
+# Rychlejší rerun
+fastReruns = true
+
+# DŮLEŽITÉ: Tato konfigurace zajistí, že sidebar má PEVNOU barvu #262730
+# a nebude průhledný na mobilech
