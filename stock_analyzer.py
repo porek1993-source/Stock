@@ -614,27 +614,45 @@ def calculate_dcf_fair_value(
     terminal_growth: float = 0.03,
     wacc: float = 0.10,
     years: int = 5,
-    shares_outstanding: Optional[float] = None
+    shares_outstanding: Optional[float] = None,
+    exit_multiple: Optional[float] = None,
+    total_cash: float = 0.0,
+    total_debt: float = 0.0,
 ) -> Optional[float]:
-    """DCF calculation."""
+    """DCF calculation.
+
+    Supports two terminal value methods:
+    - Exit Multiple (if exit_multiple is provided and > 0)
+    - Gordon Growth (fallback when exit_multiple is None)
+    """
     if fcf <= 0 or shares_outstanding is None or shares_outstanding <= 0:
         return None
-    
+
     try:
         pv_sum = 0.0
         current_fcf = fcf
-        
+
+        # Project and discount annual FCFs
         for year in range(1, years + 1):
             current_fcf *= (1 + growth_rate)
             pv_sum += current_fcf / ((1 + wacc) ** year)
-        
-        terminal_fcf = current_fcf * (1 + terminal_growth)
-        terminal_value = terminal_fcf / (wacc - terminal_growth)
+
+        if exit_multiple is not None and safe_float(exit_multiple) and safe_float(exit_multiple) > 0:
+            # Exit Multiple terminal value
+            terminal_value = current_fcf * float(exit_multiple)
+        else:
+            # Gordon Growth terminal value
+            terminal_fcf = current_fcf * (1 + terminal_growth)
+            terminal_value = terminal_fcf / (wacc - terminal_growth)
+
         pv_terminal = terminal_value / ((1 + wacc) ** years)
-        
+
         enterprise_value = pv_sum + pv_terminal
-        fair_value_per_share = enterprise_value / shares_outstanding
-        
+
+        # Equity bridge (optional)
+        equity_value = enterprise_value + (total_cash or 0.0) - (total_debt or 0.0)
+
+        fair_value_per_share = equity_value / shares_outstanding
         return fair_value_per_share
     except Exception:
         return None
@@ -646,15 +664,24 @@ def reverse_dcf_implied_growth(
     terminal_growth: float = 0.03,
     wacc: float = 0.10,
     years: int = 5,
-    shares_outstanding: Optional[float] = None
+    shares_outstanding: Optional[float] = None,
+    exit_multiple: Optional[float] = None,
+    total_cash: float = 0.0,
+    total_debt: float = 0.0,
 ) -> Optional[float]:
-    """Calculate implied growth rate from current price."""
+    """Calculate implied growth rate from current price.
+
+    Uses the same terminal method as calculate_dcf_fair_value:
+    - Exit Multiple if exit_multiple is provided
+    - Otherwise Gordon Growth
+    """
+
     if fcf <= 0 or shares_outstanding is None or shares_outstanding <= 0:
         return None
     
     try:
         def dcf_at_growth(g: float) -> float:
-            fv = calculate_dcf_fair_value(fcf, g, terminal_growth, wacc, years, shares_outstanding)
+            fv = calculate_dcf_fair_value(fcf, g, terminal_growth, wacc, years, shares_outstanding, exit_multiple=exit_multiple, total_cash=total_cash, total_debt=total_debt)
             return fv if fv else 0.0
         
         low, high = -0.5, 1.0
@@ -673,6 +700,65 @@ def reverse_dcf_implied_growth(
         return None
 
 
+
+
+# ============================================================================
+# SMART DCF PARAMS
+# ============================================================================
+
+def estimate_smart_params(info: Dict[str, Any], metrics: Dict[str, "Metric"]) -> Dict[str, float]:
+    """Estimate smart DCF parameters from Yahoo Finance info and extracted metrics.
+
+    Returns:
+        {
+            "wacc": float,
+            "growth": float,
+            "exit_multiple": float,
+        }
+    """
+    # --- WACC from Beta ---
+    beta = safe_float(info.get("beta"))
+    if beta is None:
+        wacc = 0.10
+    else:
+        # RiskFree 4.2% + Beta * 5%
+        wacc = 0.042 + (beta * 0.05)
+    # Clamp to 6% - 15%
+    wacc = max(0.06, min(0.15, wacc))
+
+    # --- Growth from Revenue + Earnings growth ---
+    def _mval(key: str) -> Optional[float]:
+        try:
+            m = metrics.get(key) if metrics else None
+            if m is None:
+                return None
+            v = getattr(m, "value", m)
+            return safe_float(v)
+        except Exception:
+            return None
+
+    rg = _mval("revenue_growth")
+    eg = _mval("earnings_growth")
+    vals = [v for v in [rg, eg] if v is not None]
+    if vals:
+        growth = float(sum(vals) / len(vals))
+    else:
+        growth = 0.10
+    # Clamp to 2% - 25%
+    growth = max(0.02, min(0.25, growth))
+
+    # --- Exit Multiple by sector ---
+    sector = (info.get("sector") or "").lower()
+    if "technology" in sector:
+        exit_multiple = 25.0
+    elif "financial" in sector:
+        exit_multiple = 12.0
+    elif "health" in sector:
+        exit_multiple = 20.0
+    else:
+        exit_multiple = 15.0
+
+    return {"wacc": wacc, "growth": growth, "exit_multiple": exit_multiple}
 # ============================================================================
 # INSIDER TRADING ANALYSIS
 # ============================================================================
@@ -1342,15 +1428,23 @@ def main():
         ).upper().strip()
         
         analyze_btn = st.button("🔍 Analyzovat", type="primary", use_container_width=True)
+        if analyze_btn:
+            st.session_state["_collapse_sidebar_once"] = True
         
         st.markdown("---")
         
         # DCF Settings
         with st.expander("⚙️ DCF Parametry", expanded=False):
+            smart_dcf = st.checkbox(
+                "⚡ Smart DCF (Automaticky)",
+                value=True,
+                help="Automaticky odhadne WACC, Growth a Exit Multiple podle bety, růstu a sektoru."
+            )
             dcf_growth = st.slider(
                 "Růst FCF (roční)",
                 0.0, 0.50, 0.10, 0.01,
-                help="Očekávaný roční růst Free Cash Flow"
+                help="Očekávaný roční růst Free Cash Flow",
+                disabled=smart_dcf
             )
             dcf_terminal = st.slider(
                 "Terminální růst",
@@ -1360,7 +1454,8 @@ def main():
             dcf_wacc = st.slider(
                 "WACC (diskont)",
                 0.05, 0.20, 0.10, 0.01,
-                help="Vážené průměrné náklady kapitálu"
+                help="Vážené průměrné náklady kapitálu",
+                disabled=smart_dcf
             )
             dcf_years = st.slider(
                 "Projektované roky",
@@ -1370,9 +1465,9 @@ def main():
             dcf_exit_multiple = st.slider(
                 "Exit Multiple (FCF)",
                 10.0, 50.0, 25.0, 1.0,
-                help="Násobek FCF v posledním projektovaném roce pro terminal value (Exit Multiple metoda)"
+                help="Násobek FCF v posledním projektovaném roce pro terminal value (Exit Multiple metoda)",
+                disabled=smart_dcf
             )
-        
         st.markdown("---")
         
         # AI Settings
@@ -1399,7 +1494,30 @@ def main():
     # MAIN CONTENT
     # ========================================================================
     
-    # Welcome screen if no analysis yet
+        # Auto-collapse sidebar after clicking Analyze (useful on mobile)
+    if st.session_state.get("_collapse_sidebar_once"):
+        components.html(
+            """
+            <script>
+            (function() {
+              const tryCollapse = () => {
+                const doc = window.parent.document;
+                const btn = doc.querySelector('button[data-testid="stSidebarCollapseButton"]')
+                          || doc.querySelector('button[aria-label="Close sidebar"]')
+                          || doc.querySelector('button[title="Close sidebar"]');
+                if (btn) btn.click();
+              };
+              setTimeout(tryCollapse, 150);
+              setTimeout(tryCollapse, 500);
+              setTimeout(tryCollapse, 1200);
+            })();
+            </script>
+            """,
+            height=0,
+        )
+        st.session_state["_collapse_sidebar_once"] = False
+
+# Welcome screen if no analysis yet
     if not analyze_btn and "last_ticker" not in st.session_state:
         display_welcome_screen()
         st.stop()
@@ -1425,7 +1543,7 @@ def main():
         ath = get_all_time_high(ticker)
         insider_df = fetch_insider_transactions(ticker)
         insider_signal = compute_insider_pro_signal(insider_df)
-        
+
         # DCF calculations
         market_cap_for_fcf = safe_float(info.get("marketCap"))
         fcf, fcf_dbg = get_fcf_ttm_yfinance(ticker, market_cap_for_fcf)
@@ -1433,49 +1551,54 @@ def main():
             print(_m)
         shares = safe_float(info.get("sharesOutstanding"))
         current_price = metrics.get("price").value if metrics.get("price") else None
-        
+
+        # Smart vs Manual DCF params
+        smart_params = estimate_smart_params(info, metrics) if smart_dcf else None
+        used_growth = smart_params["growth"] if smart_params else dcf_growth
+        used_wacc = smart_params["wacc"] if smart_params else dcf_wacc
+        used_exit_multiple = smart_params["exit_multiple"] if smart_params else float(dcf_exit_multiple)
+        dcf_param_source = "Smart" if smart_params else "Manual"
+        st.session_state["used_dcf_params"] = {
+            "growth": used_growth,
+            "wacc": used_wacc,
+            "exit_multiple": used_exit_multiple,
+            "source": dcf_param_source,
+        }
+
         fair_value_dcf = None
         mos_dcf = None
         implied_growth = None
-        
+
         if fcf and shares and fcf > 0:
-            # --- NOVÝ VÝPOČET DCF (Exit Multiple Metoda) ---
-            # 1. Spočítáme budoucí FCF pro každý rok
-            future_fcf = []
-            current_fcf = fcf
-            
-            # Diskontní faktor
-            discount_factors = [(1 + dcf_wacc) ** i for i in range(1, dcf_years + 1)]
-            
-            for i in range(dcf_years):
-                current_fcf = current_fcf * (1 + dcf_growth)
-                future_fcf.append(current_fcf)
-            
-            # 2. Terminal Value (Hodnota na konci 5. roku)
-            # Použijeme Exit Multiple (pro Big Tech standardně 25x, ne konzervativní Gordon)
-            exit_multiple = float(dcf_exit_multiple)
-            terminal_value = future_fcf[-1] * exit_multiple
-            
-            # 3. Diskontování na dnešní hodnotu (PV)
-            pv_cash_flows = sum([f / d for f, d in zip(future_fcf, discount_factors)])
-            pv_terminal_value = terminal_value / ((1 + dcf_wacc) ** dcf_years)
-            
-            enterprise_value = pv_cash_flows + pv_terminal_value
-            
-            # 4. Equity Value (EV + Cash - Debt)
-            total_cash = safe_float(info.get('totalCash')) or 0
-            total_debt = safe_float(info.get('totalDebt')) or 0
-            equity_value = enterprise_value + total_cash - total_debt
-            
-            fair_value_dcf = equity_value / shares
-            
-            # Přepočet MOS a Implied Growth
-            if current_price:
+            total_cash = safe_float(info.get("totalCash")) or 0
+            total_debt = safe_float(info.get("totalDebt")) or 0
+
+            fair_value_dcf = calculate_dcf_fair_value(
+                fcf,
+                growth_rate=used_growth,
+                terminal_growth=dcf_terminal,
+                wacc=used_wacc,
+                years=dcf_years,
+                shares_outstanding=shares,
+                exit_multiple=used_exit_multiple,
+                total_cash=total_cash,
+                total_debt=total_debt,
+            )
+
+            if fair_value_dcf and current_price:
                 mos_dcf = (fair_value_dcf / current_price) - 1.0
                 implied_growth = reverse_dcf_implied_growth(
-                    current_price, fcf, dcf_terminal, dcf_wacc, dcf_years, shares
+                    current_price,
+                    fcf,
+                    terminal_growth=dcf_terminal,
+                    wacc=used_wacc,
+                    years=dcf_years,
+                    shares_outstanding=shares,
+                    exit_multiple=used_exit_multiple,
+                    total_cash=total_cash,
+                    total_debt=total_debt,
                 )
-        
+
         # Analyst fair value
         analyst_target = metrics.get("target_mean").value if metrics.get("target_mean") else None
         mos_analyst = None
@@ -1903,6 +2026,19 @@ def main():
     # ------------------------------------------------------------------------
     with tabs[5]:
         st.markdown('<div class="section-header">💰 DCF Valuace & Reverse DCF</div>', unsafe_allow_html=True)
+        
+        # ℹ️ Used DCF parameters (Smart vs Manual)
+        _p = st.session_state.get("used_dcf_params") or {}
+        _src = _p.get("source", "Manual")
+        _g = _p.get("growth", dcf_growth)
+        _w = _p.get("wacc", dcf_wacc)
+        _x = _p.get("exit_multiple", float(dcf_exit_multiple))
+        st.info(f"Použitý Růst: {_g*100:.1f}% ({_src}) | Použitý WACC: {_w*100:.1f}% ({_src}) | Exit Multiple: {_x:.1f}× ({_src})")
+        if _src == "Smart":
+            _beta = safe_float(info.get("beta"))
+            _beta_str = f"{_beta:.2f}" if _beta is not None else "—"
+            st.caption(f"Smart odhad: Beta {_beta_str} • Sektor: {info.get('sector','—')}")
+
         
         if fcf and shares and fcf > 0:
             # Main DCF results
