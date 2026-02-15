@@ -47,6 +47,7 @@ st.markdown(
 
 
 def js_close_sidebar():
+    """Return HTML+JS that attempts to close Streamlit sidebar/drawer (mobile + desktop)."""
     return """
     <script>
       (function () {
@@ -56,75 +57,68 @@ def js_close_sidebar():
         }
 
         function isSidebarOpen(doc) {
-          var sidebar = doc.querySelector('section[data-testid="stSidebar"], [data-testid="stSidebar"]');
-          if (!sidebar) return false;
+          var sb = doc.querySelector('section[data-testid="stSidebar"], [data-testid="stSidebar"]');
+          if (!sb) return false;
           try {
-            var r = sidebar.getBoundingClientRect();
-            // If it's a mobile drawer, when closed it is usually translated off-screen and width may still be >0.
-            // We treat it as open when it occupies visible space on the viewport.
-            var vw = Math.max(doc.documentElement.clientWidth || 0, window.innerWidth || 0);
-            var visibleW = Math.min(r.right, vw) - Math.max(r.left, 0);
-            return visibleW > 40; // visible enough to be considered open
+            var r = sb.getBoundingClientRect();
+            // On desktop sidebar has width; on mobile drawer may overlay with width as well
+            return (r.width && r.width > 40) || (r.right && r.right > 40);
           } catch (e) {
-            return false;
-          }
-        }
-
-        function safeClick(btn) {
-          if (!btn) return false;
-          try {
-            btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-            btn.click();
             return true;
-          } catch (e) {
-            try { btn.click(); return true; } catch (e2) { return false; }
           }
         }
 
         function findCloseButton(doc) {
           var selectors = [
             'button[aria-label="Close sidebar"]',
-            'button[title="Close sidebar"]',
             'button[aria-label="Collapse sidebar"]',
+            'button[title="Close sidebar"]',
             '[data-testid="stSidebarCollapseButton"]',
-            '[data-testid="stSidebarToggleButton"][aria-label="Close sidebar"]',
-            'header button[aria-label="Close sidebar"]'
+            '[data-testid="stSidebarToggleButton"]',
+            'header button[aria-label="Close sidebar"]',
+            'header button[aria-label="Collapse sidebar"]',
+            'header [data-testid="stSidebarCollapseButton"]',
+            'header [data-testid="stSidebarToggleButton"]'
           ];
           for (var i = 0; i < selectors.length; i++) {
-            var b = doc.querySelector(selectors[i]);
-            if (b) return b;
+            var el = doc.querySelector(selectors[i]);
+            if (el) return el;
           }
-
-          // Fallback: first button inside sidebar header
-          var sidebar = doc.querySelector('section[data-testid="stSidebar"], [data-testid="stSidebar"]');
-          if (sidebar) {
-            var b2 = sidebar.querySelector('button[kind="header"]') || sidebar.querySelector('button');
-            if (b2) return b2;
+          // Fallback: first button inside sidebar section
+          var sb = doc.querySelector('section[data-testid="stSidebar"], [data-testid="stSidebar"]');
+          if (sb) {
+            var b = sb.querySelector('button');
+            if (b) return b;
           }
           return null;
         }
 
-        var doc = getDoc();
-        var attempts = 0;
-        var timer = setInterval(function () {
-          attempts += 1;
-
-          // Only close if sidebar is actually open (prevents toggling it open by accident)
-          if (!isSidebarOpen(doc)) {
-            clearInterval(timer);
-            return;
-          }
-
+        function attemptClose() {
+          var doc = getDoc();
+          if (!isSidebarOpen(doc)) return true; // nothing to do
           var btn = findCloseButton(doc);
-          if (safeClick(btn)) {
-            // Check again shortly; if closed, stop.
-            setTimeout(function () {
-              if (!isSidebarOpen(doc)) clearInterval(timer);
-            }, 120);
+          if (btn) {
+            btn.click();
+            // second click helps on some mobile browsers
+            setTimeout(function(){ try { btn.click(); } catch(e){} }, 120);
+            return true;
           }
+          return false;
+        }
 
-          if (attempts > 25) clearInterval(timer);
+        var tries = 0;
+        var maxTries = 25;
+        var timer = setInterval(function () {
+          tries++;
+          var ok = false;
+          try { ok = attemptClose(); } catch (e) { ok = false; }
+          if (ok || tries >= maxTries) {
+            clearInterval(timer);
+          }
         }, 120);
+
+        // Also try shortly after start
+        setTimeout(function(){ try { attemptClose(); } catch(e){} }, 60);
       })();
     </script>
     """
@@ -1325,110 +1319,111 @@ TEXT:
 # -----------------------------------------------------------------------------
 # Smart parameter estimation (Quality Premium)
 # -----------------------------------------------------------------------------
-def estimate_smart_params(info: Dict[str, Any], metrics: Dict[str, "Metric"]) -> Dict[str, Any]:
+def def estimate_smart_params(info: Dict[str, Any], metrics: Dict[str, "Metric"]) -> Dict[str, Any]:
     """
-    Smart DCF parameter estimation tuned for both mega-caps and smaller firms.
-
-    Changes requested:
-      1) Weighted growth: raw_growth = 0.7*revenue_growth + 0.3*earnings_growth (fallbacks if missing)
-      2) Dynamic growth cap:
-           - marketCap > 200B  -> cap 14%
-           - marketCap <= 200B -> cap 20%
-      3) Exit multiple (realistic):
-           - High Quality Tech/Comm -> 23x
-           - Standard Tech/Comm     -> 20x
-           - Others                 -> 15x
-      4) WACC with size premium:
-           - Base: 4.2% + beta*5%
-           - Mega caps (>200B): floor 9%
-           - Small caps (<10B): +1.5% and floor 10%
-           - Otherwise: floor 8%
+    Konzervativní odhad DCF parametrů.
+    Cíl: Zabránit "úletům" u Mega Caps (MSFT, AAPL) a opravit Amazon.
     """
-    def metric_value(key: str) -> Optional[float]:
-        m = metrics.get(key)
-        if m is None:
-            return None
-        return safe_float(getattr(m, "value", None))
-
-    dbg: List[str] = []
-
     market_cap = safe_float(info.get("marketCap")) or 0.0
     sector = str(info.get("sector") or "").strip()
+    
+    # 1. DEFINICE VELIKOSTI
+    is_mega_cap = market_cap > 200e9  # > 200 mld USD
+    is_large_cap = market_cap > 50e9   # > 50 mld USD
 
-    is_mega_cap = market_cap > 200e9
-    is_small_cap = market_cap > 0 and market_cap < 10e9
-
-    # --- Quality detection (Quality Premium)
-    profit_margin = metric_value("profit_margin")
-    roe = metric_value("roe")
-    high_quality = bool(
-        (profit_margin is not None and profit_margin > 0.20) and
-        (roe is not None and roe > 0.20)
-    )
-    if high_quality:
-        dbg.append("Quality: High (profit_margin>20% & ROE>20%)")
-
-    # --- Growth (weighted)
-    rev_g = metric_value("revenue_growth")
-    earn_g = metric_value("earnings_growth")
-
-    if rev_g is None and earn_g is None:
-        raw_growth = 0.10
-        dbg.append("Growth: missing rev/earn -> default 10%")
-    elif rev_g is None:
-        raw_growth = float(earn_g)
-        dbg.append("Growth: using earnings_growth only")
-    elif earn_g is None:
-        raw_growth = float(rev_g)
-        dbg.append("Growth: using revenue_growth only")
-    else:
-        raw_growth = (0.7 * float(rev_g)) + (0.3 * float(earn_g))
-        dbg.append("Growth: weighted 70% revenue + 30% earnings")
-
-    # clamp raw growth to a sane range before cap
-    raw_growth = float(max(0.02, min(0.35, raw_growth)))
-
-    # --- Dynamic growth cap
-    # Base caps: mega-caps grow slower than smaller firms. For High-Quality mega-caps we allow a higher cap.
-    if is_mega_cap and high_quality:
-        growth_cap = 0.22
-        dbg.append("Growth cap: 22.0% (mega + high quality)")
-    else:
-        growth_cap = 0.14 if is_mega_cap else 0.20
-        dbg.append(f"Growth cap: {growth_cap*100:.1f}% ({'mega' if is_mega_cap else 'non-mega'})")
-
-    growth = float(min(raw_growth, growth_cap))
-
-    # --- Exit multiple (dynamic by growth)
-    # exit_multiple = 15 + growth(%). Clamp 15x..35x.
-    exit_multiple = 15.0 + (growth * 100.0)
-    exit_multiple = float(max(15.0, min(35.0, exit_multiple)))
-    dbg.append(f"Exit multiple: 15 + growth% -> {exit_multiple:.1f}x")
-
-    # --- WACC (base + size premium)
+    # 2. WACC (Diskontní sazba)
+    # Zvedáme "podlahu" na 9.0% pro větší bezpečnost
     beta = safe_float(info.get("beta"))
     if beta is None or beta <= 0:
         base_wacc = 0.10
-        dbg.append("WACC: beta missing/invalid -> default 10%")
     else:
-        base_wacc = 0.042 + float(beta) * 0.05
-        dbg.append(f"WACC: base = 4.2% + beta*5% (beta={beta:.2f})")
+        # RiskFree (4.2%) + Beta * ERP (5.0%)
+        base_wacc = 0.042 + (beta * 0.05)
+    
+    # Omezení WACC: Min 9%, Max 15%
+    wacc = max(0.09, min(0.15, base_wacc))
+    
+    # Size Premium: Malé firmy jsou rizikovější -> přidáme 1.5%
+    if market_cap < 10e9 and market_cap > 0:
+        wacc += 0.015
 
-    if is_small_cap:
-        base_wacc += 0.015
-        wacc_floor = 0.10
-        dbg.append("WACC: small-cap premium +1.5%, floor 10%")
-    elif is_mega_cap:
-        wacc_floor = 0.09
-        dbg.append("WACC: mega-cap floor 9%")
+    # 3. RŮST (Weighted Growth)
+    # Vážíme tržby (70%) a zisky (30%), protože tržby jsou stabilnější
+    rev_g = None
+    earn_g = None
+    try:
+        if metrics.get("revenue_growth") and metrics["revenue_growth"].value is not None:
+            rev_g = float(metrics["revenue_growth"].value)
+    except:
+        pass
+    
+    try:
+        if metrics.get("earnings_growth") and metrics["earnings_growth"].value is not None:
+            earn_g = float(metrics["earnings_growth"].value)
+    except:
+        pass
+
+    # Výpočet váženého růstu
+    if rev_g is not None and earn_g is not None:
+        raw_growth = (0.7 * rev_g) + (0.3 * earn_g)
+    elif rev_g is not None:
+        raw_growth = rev_g
+    elif earn_g is not None:
+        raw_growth = earn_g
     else:
-        wacc_floor = 0.08
-        dbg.append("WACC: default floor 8%")
+        raw_growth = 0.10  # Fallback
 
-    wacc = float(max(wacc_floor, min(0.18, base_wacc)))
+    # 4. STROP RŮSTU (Growth Cap) - Tady se krotí ty "brutální" čísla
+    if is_mega_cap:
+        # Giganti nemohou růst o 20% věčně -> Cap 14%
+        growth_cap = 0.14
+    elif is_large_cap:
+        growth_cap = 0.18
+    else:
+        # Malé dravé firmy mohou růst rychleji
+        growth_cap = 0.25
+        
+    growth = max(0.03, min(growth_cap, raw_growth))
 
-    return {"wacc": wacc, "growth": growth, "exit_multiple": exit_multiple, "dbg": dbg}
+    # 5. EXIT MULTIPLE (Konzervativní)
+    # Základ podle sektoru
+    sector_l = sector.lower()
+    
+    if "technology" in sector_l:
+        base_multiple = 20.0
+    elif "communication" in sector_l:  # Google, Meta
+        base_multiple = 18.0
+    elif "consumer cyclical" in sector_l:  # Amazon, Tesla
+        base_multiple = 20.0
+    elif "financial" in sector_l or "energy" in sector_l:
+        base_multiple = 12.0
+    elif "healthcare" in sector_l:
+        base_multiple = 18.0
+    else:
+        base_multiple = 15.0
+        
+    # Bonus za kvalitu (High Quality Premium)
+    # Pokud má firma marže > 20% a ROE > 20%, zaslouží si vyšší násobek
+    pm = safe_float(metrics.get("profit_margin").value) if metrics.get("profit_margin") else 0
+    roe = safe_float(metrics.get("roe").value) if metrics.get("roe") else 0
+    
+    if pm > 0.20 and roe > 0.20:
+        exit_multiple = base_multiple + 5.0  # Quality boost
+    else:
+        exit_multiple = base_multiple
 
+    # STROP NÁSOBKU: Aby nám Microsoft neulétl na 35x
+    # I tu nejlepší firmu v modelu prodáváme max za 25x FCF
+    exit_multiple = min(25.0, exit_multiple)
+
+    return {
+        "wacc": float(wacc),
+        "growth": float(growth),
+        "exit_multiple": float(exit_multiple),
+        "is_mega_cap": bool(is_mega_cap),
+        "market_cap": float(market_cap),
+        "sector": sector
+    }
 
 def main():
     """Main application entry point."""
