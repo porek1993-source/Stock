@@ -54,7 +54,7 @@ except Exception:
 APP_NAME = "Stock Picker Pro"
 APP_VERSION = "v2.0"
 
-GEMINI_MODEL = "gemini-2.0-flash-exp"
+GEMINI_MODEL = "gemini-2.5-flash-lite"
 
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), ".stock_picker_pro")
