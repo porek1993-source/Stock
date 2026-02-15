@@ -94,7 +94,7 @@ except Exception:
 APP_NAME = "Stock Picker Pro"
 APP_VERSION = "v2.0"
 
-GEMINI_MODEL = "gemini-2.0-flash-exp"
+GEMINI_MODEL = "gemini-2.5-flash-lite"
 
 
 
@@ -1264,89 +1264,113 @@ TEXT:
 # Smart parameter estimation (Quality Premium)
 # -----------------------------------------------------------------------------
 def estimate_smart_params(info: Dict[str, Any], metrics: Dict[str, "Metric"]) -> Dict[str, Any]:
-    """Estimate DCF parameters based on beta/sector + simple quality signals.
+    """Estimate 'Smart DCF' parameters using sector, size and simple quality signals.
 
-    Returns dict with: wacc, growth, exit_multiple, is_mega_cap, high_quality, market_cap, sector
+    Universal logic for mega-caps and smaller firms:
+      - Weighted growth (70% revenue, 30% earnings) with graceful fallbacks.
+      - Size-aware growth caps (mega-caps capped lower than smaller firms).
+      - Realistic exit multiples by (quality × sector).
+      - WACC = 4.2% + beta*5% with size premium / floors.
     """
+    def metric_value(key: str) -> Optional[float]:
+        m = metrics.get(key)
+        if m is None:
+            return None
+        return safe_float(getattr(m, "value", None))
+
     market_cap = safe_float(info.get("marketCap")) or 0.0
     sector = str(info.get("sector") or "").strip()
 
-    is_mega_cap = market_cap > 200e9
+    # --- Quality detection
+    profit_margin = metric_value("profit_margin")
+    roe = metric_value("roe")
+    high_quality = bool(
+        (profit_margin is not None and profit_margin > 0.20) and
+        (roe is not None and roe > 0.20)
+    )
 
-    # --- WACC (CAPM-ish proxy): 4.2% + beta * 5%, clamped
+    # --- Growth (weighted): 70% revenue, 30% earnings (with fallbacks)
+    rev_g = metric_value("revenue_growth")
+    earn_g = metric_value("earnings_growth")
+
+    if rev_g is not None and earn_g is not None:
+        raw_growth = (0.7 * rev_g) + (0.3 * earn_g)
+        growth_method = "weighted(0.7*revenue + 0.3*earnings)"
+    elif rev_g is not None:
+        raw_growth = rev_g
+        growth_method = "revenue_growth_only"
+    elif earn_g is not None:
+        raw_growth = earn_g
+        growth_method = "earnings_growth_only"
+    else:
+        raw_growth = 0.10
+        growth_method = "default_10pct"
+
+    # --- Dynamic growth cap by size
+    if market_cap > 200e9:
+        growth_cap = 0.14
+        is_mega_cap = True
+    else:
+        growth_cap = 0.20
+        is_mega_cap = False
+
+    # Clamp growth to a sensible band
+    growth = max(0.02, min(growth_cap, raw_growth))
+
+    # --- Exit multiple (realistic)
+    tech_like = sector.lower() in {"technology", "communication services", "communication"}
+    if tech_like and high_quality:
+        exit_multiple = 23.0
+        multiple_bucket = "high_quality_tech"
+    elif tech_like:
+        exit_multiple = 20.0
+        multiple_bucket = "standard_tech"
+    else:
+        exit_multiple = 15.0
+        multiple_bucket = "other"
+
+    # --- WACC with size premium / floors
     beta = safe_float(info.get("beta"))
     if beta is None or beta <= 0:
         wacc = 0.10
+        wacc_method = "default_10pct_no_beta"
     else:
         wacc = 0.042 + (beta * 0.05)
-    # Floor raised to 8%
-    wacc = max(0.08, min(0.15, wacc))
+        wacc_method = "rf(4.2%) + beta*5%"
 
-    # --- Growth: average of revenue + earnings growth, clamped
-    rev_g = None
-    earn_g = None
-    try:
-        if metrics.get("revenue_growth") and metrics["revenue_growth"].value is not None:
-            rev_g = float(metrics["revenue_growth"].value)
-    except Exception:
-        rev_g = None
-    try:
-        if metrics.get("earnings_growth") and metrics["earnings_growth"].value is not None:
-            earn_g = float(metrics["earnings_growth"].value)
-    except Exception:
-        earn_g = None
-
-    growth_vals = [g for g in [rev_g, earn_g] if isinstance(g, (int, float)) and not math.isnan(g)]
-    if growth_vals:
-        growth = sum(growth_vals) / len(growth_vals)
+    # Small-cap premium (<$10B)
+    if 0 < market_cap < 10e9:
+        wacc += 0.015
+        wacc_floor = 0.10
+        size_bucket = "small_cap_<10B"
+    # Mega-cap floor (>$200B)
+    elif market_cap > 200e9:
+        wacc_floor = 0.09
+        size_bucket = "mega_cap_>200B"
     else:
-        growth = 0.10
+        wacc_floor = 0.08
+        size_bucket = "mid_cap"
 
-    growth_cap = 0.20 if is_mega_cap else 0.25
-    growth = max(0.02, min(growth_cap, growth))
-
-    # --- Quality detection: profit_margin > 20% AND roe > 20%
-    pm = None
-    roe = None
-    try:
-        if metrics.get("profit_margin") and metrics["profit_margin"].value is not None:
-            pm = float(metrics["profit_margin"].value)
-    except Exception:
-        pm = None
-    try:
-        if metrics.get("roe") and metrics["roe"].value is not None:
-            roe = float(metrics["roe"].value)
-    except Exception:
-        roe = None
-
-    high_quality = (pm is not None and roe is not None and pm > 0.20 and roe > 0.20)
-
-    # --- Exit multiple by sector + quality premium
-    sector_l = sector.lower()
-    if sector_l in ("technology", "communication services", "communication"):
-        exit_multiple = 25.0
-        if high_quality:
-            exit_multiple = 30.0
-    elif sector_l in ("financial services", "financial", "financials"):
-        exit_multiple = 12.0
-    elif sector_l in ("energy",):
-        exit_multiple = 15.0
-    elif sector_l in ("healthcare", "health care"):
-        exit_multiple = 20.0
-    else:
-        exit_multiple = 15.0
+    # Apply floor + reasonable upper clamp
+    wacc = max(wacc_floor, min(0.18, wacc))
 
     return {
-        "wacc": float(wacc),
-        "growth": float(growth),
-        "exit_multiple": float(exit_multiple),
-        "is_mega_cap": bool(is_mega_cap),
-        "high_quality": bool(high_quality),
-        "market_cap": float(market_cap),
+        "wacc": wacc,
+        "growth": growth,
+        "exit_multiple": exit_multiple,
+        "is_mega_cap": is_mega_cap,
+        "high_quality": high_quality,
+        "market_cap": market_cap,
         "sector": sector,
-        "beta": beta,
-        "profit_margin": pm,
-        "roe": roe,
+        "dbg": {
+            "growth_method": growth_method,
+            "growth_cap": growth_cap,
+            "raw_growth": raw_growth,
+            "multiple_bucket": multiple_bucket,
+            "wacc_method": wacc_method,
+            "wacc_floor": wacc_floor,
+            "size_bucket": size_bucket,
+        },
     }
 
 def main():
