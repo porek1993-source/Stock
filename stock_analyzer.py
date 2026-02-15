@@ -1405,8 +1405,8 @@ pand main content when sidebar hidden */
         insider_df = fetch_insider_transactions(ticker)
         insider_signal = compute_insider_pro_signal(insider_df)
         
-        # DCF calculations (robust FCF TTM from quarterly cashflow)
-        fcf, _fcf_dbg = get_fcf_ttm_yfinance(t, info, debug=True)
+        # DCF calculations
+        fcf = safe_float(info.get("freeCashflow"))
         shares = safe_float(info.get("sharesOutstanding"))
         current_price = metrics.get("price").value if metrics.get("price") else None
         
