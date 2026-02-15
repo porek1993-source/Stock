@@ -49,44 +49,86 @@ st.markdown(
 def js_close_sidebar():
     return """
     <script>
-        // Close Streamlit sidebar (mobile drawer + desktop) by clicking the built-in toggle.
-        // No hard-hiding of the sidebar element (prevents "invisible sidebar" issues when user re-opens it).
-        (function () {
-            function getDoc() {
-                return (window.parent && window.parent.document) ? window.parent.document : document;
-            }
+      (function () {
+        function getDoc() {
+          try { return (window.parent && window.parent.document) ? window.parent.document : document; }
+          catch (e) { return document; }
+        }
 
-            function clickCloseOnce() {
-                var doc = getDoc();
+        function isSidebarOpen(doc) {
+          var sidebar = doc.querySelector('section[data-testid="stSidebar"], [data-testid="stSidebar"]');
+          if (!sidebar) return false;
+          try {
+            var r = sidebar.getBoundingClientRect();
+            // If it's a mobile drawer, when closed it is usually translated off-screen and width may still be >0.
+            // We treat it as open when it occupies visible space on the viewport.
+            var vw = Math.max(doc.documentElement.clientWidth || 0, window.innerWidth || 0);
+            var visibleW = Math.min(r.right, vw) - Math.max(r.left, 0);
+            return visibleW > 40; // visible enough to be considered open
+          } catch (e) {
+            return false;
+          }
+        }
 
-                // 1) Mobile drawer close (most reliable when present)
-                var btn = doc.querySelector('button[aria-label="Close sidebar"]');
+        function safeClick(btn) {
+          if (!btn) return false;
+          try {
+            btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+            btn.click();
+            return true;
+          } catch (e) {
+            try { btn.click(); return true; } catch (e2) { return false; }
+          }
+        }
 
-                // 2) Desktop collapse
-                if (!btn) btn = doc.querySelector('[data-testid="stSidebarCollapseButton"]');
+        function findCloseButton(doc) {
+          var selectors = [
+            'button[aria-label="Close sidebar"]',
+            'button[title="Close sidebar"]',
+            'button[aria-label="Collapse sidebar"]',
+            '[data-testid="stSidebarCollapseButton"]',
+            '[data-testid="stSidebarToggleButton"][aria-label="Close sidebar"]',
+            'header button[aria-label="Close sidebar"]'
+          ];
+          for (var i = 0; i < selectors.length; i++) {
+            var b = doc.querySelector(selectors[i]);
+            if (b) return b;
+          }
 
-                // 3) Fallback: first button inside sidebar section (often the header toggle)
-                if (!btn) {
-                    var sidebar = doc.querySelector('section[data-testid="stSidebar"], [data-testid="stSidebar"]');
-                    if (sidebar) btn = sidebar.querySelector('button');
-                }
+          // Fallback: first button inside sidebar header
+          var sidebar = doc.querySelector('section[data-testid="stSidebar"], [data-testid="stSidebar"]');
+          if (sidebar) {
+            var b2 = sidebar.querySelector('button[kind="header"]') || sidebar.querySelector('button');
+            if (b2) return b2;
+          }
+          return null;
+        }
 
-                if (btn) {
-                    try { btn.click(); } catch (e) {}
-                    // Some mobiles need a second tap
-                    setTimeout(function(){ try { btn.click(); } catch(e) {} }, 120);
-                    return true;
-                }
-                return false;
-            }
+        var doc = getDoc();
+        var attempts = 0;
+        var timer = setInterval(function () {
+          attempts += 1;
 
-            // Delay a bit so Streamlit has time to render UI after the click + rerun
-            setTimeout(function () { clickCloseOnce(); }, 250);
-            setTimeout(function () { clickCloseOnce(); }, 500);
-            setTimeout(function () { clickCloseOnce(); }, 900);
-        })();
+          // Only close if sidebar is actually open (prevents toggling it open by accident)
+          if (!isSidebarOpen(doc)) {
+            clearInterval(timer);
+            return;
+          }
+
+          var btn = findCloseButton(doc);
+          if (safeClick(btn)) {
+            // Check again shortly; if closed, stop.
+            setTimeout(function () {
+              if (!isSidebarOpen(doc)) clearInterval(timer);
+            }, 120);
+          }
+
+          if (attempts > 25) clearInterval(timer);
+        }, 120);
+      })();
     </script>
     """
+
 def _get_secret(name: str, default: str = "") -> str:
     try:
         # Streamlit Cloud secrets
