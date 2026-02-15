@@ -26,16 +26,25 @@ import yfinance as yf
 import streamlit as st
 import streamlit.components.v1 as components
 
+
+def js_close_sidebar():
+    return """
+    <script>
+        var sidebar = window.parent.document.querySelector('[data-testid="stSidebar"]');
+        if (sidebar) {
+            var closeBtn = sidebar.querySelector('button[kind="header"]');
+            if (closeBtn) { closeBtn.click(); }
+        }
+    </script>
+    """
+
 # Streamlit page config MUST be the first Streamlit command
 # Sidebar state persistence (mobile-friendly)
-if "sidebar_state" not in st.session_state:
-    st.session_state.sidebar_state = "expanded"
-
 st.set_page_config(
     page_title="Stock Picker Pro v2.0",
     page_icon="📈",
     layout="wide",
-    initial_sidebar_state=st.session_state.sidebar_state,
+    initial_sidebar_state="expanded",
 )
 
 # --- Secrets / API keys (Streamlit Cloud: use Secrets) ---
@@ -1324,10 +1333,6 @@ def estimate_smart_params(info: Dict[str, Any], metrics: Dict[str, "Metric"]) ->
 def main():
     """Main application entry point."""
 
-    # Sidebar state init (for mobile drawer closing)
-    if "sidebar_state" not in st.session_state:
-        st.session_state.sidebar_state = "expanded"
-
     # Page configuration is set at module import (must be first Streamlit command)
     
     # Custom CSS
@@ -1424,9 +1429,6 @@ def main():
     # ========================================================================
     # SIDEBAR - Settings & Controls
     # ========================================================================
-    
-    def close_sidebar():
-        st.session_state.sidebar_state = "collapsed"
 
     with st.sidebar:
         st.title("📈 Stock Picker Pro")
@@ -1441,7 +1443,10 @@ def main():
             max_chars=10
         ).upper().strip()
         
-        analyze_btn = st.button("🔍 Analyzovat", type="primary", use_container_width=True, on_click=close_sidebar)
+        analyze_btn = st.button("🔍 Analyzovat", type="primary", use_container_width=True)
+
+        if analyze_btn:
+            components.html(js_close_sidebar(), height=0, width=0)
         
         st.markdown("---")
         
