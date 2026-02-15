@@ -49,58 +49,41 @@ st.markdown(
 def js_close_sidebar():
     return """
     <script>
-        // Robust close for Streamlit sidebar (mobile drawer + desktop)
+        // Close Streamlit sidebar (mobile drawer + desktop) by clicking the built-in toggle.
+        // No hard-hiding of the sidebar element (prevents "invisible sidebar" issues when user re-opens it).
         (function () {
             function getDoc() {
                 return (window.parent && window.parent.document) ? window.parent.document : document;
             }
-            function tryClose() {
-                const doc = getDoc();
 
-                // 1) Preferred buttons (mobile + desktop)
-                const selectors = [
-                    'button[aria-label="Close sidebar"]',
-                    'button[title="Close sidebar"]',
-                    '[data-testid="stSidebarCollapseButton"]',
-                    '[data-testid="stSidebarToggleButton"]'
-                ];
+            function clickCloseOnce() {
+                var doc = getDoc();
 
-                let btn = null;
-                for (const sel of selectors) {
-                    const el = doc.querySelector(sel);
-                    if (el) { btn = el; break; }
-                }
+                // 1) Mobile drawer close (most reliable when present)
+                var btn = doc.querySelector('button[aria-label="Close sidebar"]');
 
-                // 2) Fallback: first button inside the sidebar header area
+                // 2) Desktop collapse
+                if (!btn) btn = doc.querySelector('[data-testid="stSidebarCollapseButton"]');
+
+                // 3) Fallback: first button inside sidebar section (often the header toggle)
                 if (!btn) {
-                    const sidebar = doc.querySelector('section[data-testid="stSidebar"], [data-testid="stSidebar"]');
-                    if (sidebar) {
-                        btn = sidebar.querySelector('button');
-                    }
+                    var sidebar = doc.querySelector('section[data-testid="stSidebar"], [data-testid="stSidebar"]');
+                    if (sidebar) btn = sidebar.querySelector('button');
                 }
 
-                // 3) Click if found
                 if (btn) {
                     try { btn.click(); } catch (e) {}
+                    // Some mobiles need a second tap
+                    setTimeout(function(){ try { btn.click(); } catch(e) {} }, 120);
+                    return true;
                 }
-
-                // 4) Last-resort: temporarily hide sidebar element so it doesn't cover content,
-                // but restore it shortly after so the user can open it again (prevents "invisible sidebar" bug).
-                const sidebarEl = doc.querySelector('section[data-testid="stSidebar"], [data-testid="stSidebar"]');
-                if (sidebarEl) {
-                    const prevDisplay = sidebarEl.style.display;
-                    sidebarEl.style.display = 'none';
-                    setTimeout(function() {
-                        // Restore previous display (or default) so sidebar can be opened manually later
-                        sidebarEl.style.display = prevDisplay || '';
-                    }, 900);
-                }
+                return false;
             }
 
-            // Let Streamlit render first, then close. Try a few times.
-            setTimeout(function () { tryClose(); }, 150);
-            setTimeout(function () { tryClose(); }, 350);
-            setTimeout(function () { tryClose(); }, 700);
+            // Delay a bit so Streamlit has time to render UI after the click + rerun
+            setTimeout(function () { clickCloseOnce(); }, 250);
+            setTimeout(function () { clickCloseOnce(); }, 500);
+            setTimeout(function () { clickCloseOnce(); }, 900);
         })();
     </script>
     """
@@ -1364,19 +1347,21 @@ def estimate_smart_params(info: Dict[str, Any], metrics: Dict[str, "Metric"]) ->
     raw_growth = float(max(0.02, min(0.35, raw_growth)))
 
     # --- Dynamic growth cap
-    growth_cap = 0.14 if is_mega_cap else 0.20
-    growth = float(min(raw_growth, growth_cap))
-    dbg.append(f"Growth cap: {growth_cap*100:.1f}% ({'mega' if is_mega_cap else 'non-mega'})")
-
-    # --- Exit multiple (realistic by quality × sector bucket)
-    sector_l = sector.lower()
-    is_tech_comm = ("technology" in sector_l) or ("communication" in sector_l)
-    if is_tech_comm:
-        exit_multiple = 23.0 if high_quality else 20.0
-        dbg.append(f"Exit multiple: {'HQ' if high_quality else 'Std'} Tech/Comm -> {exit_multiple:.1f}x")
+    # Base caps: mega-caps grow slower than smaller firms. For High-Quality mega-caps we allow a higher cap.
+    if is_mega_cap and high_quality:
+        growth_cap = 0.22
+        dbg.append("Growth cap: 22.0% (mega + high quality)")
     else:
-        exit_multiple = 15.0
-        dbg.append(f"Exit multiple: Other -> {exit_multiple:.1f}x")
+        growth_cap = 0.14 if is_mega_cap else 0.20
+        dbg.append(f"Growth cap: {growth_cap*100:.1f}% ({'mega' if is_mega_cap else 'non-mega'})")
+
+    growth = float(min(raw_growth, growth_cap))
+
+    # --- Exit multiple (dynamic by growth)
+    # exit_multiple = 15 + growth(%). Clamp 15x..35x.
+    exit_multiple = 15.0 + (growth * 100.0)
+    exit_multiple = float(max(15.0, min(35.0, exit_multiple)))
+    dbg.append(f"Exit multiple: 15 + growth% -> {exit_multiple:.1f}x")
 
     # --- WACC (base + size premium)
     beta = safe_float(info.get("beta"))
