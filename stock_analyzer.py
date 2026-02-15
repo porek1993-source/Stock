@@ -38,7 +38,7 @@ except Exception:
 APP_NAME = "Stock Picker Pro"
 APP_VERSION = "v2.0"
 GEMINI_API_KEY = st.secrets  # Add your Gemini API key here
-GEMINI_MODEL = ""gemini-2.5-flash-lite""
+GEMINI_MODEL = "gemini-2.5-flash-lite"
 FMP_API_KEY = st.secrets  # Optional: Financial Modeling Prep API key
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), ".stock_picker_pro")
