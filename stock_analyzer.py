@@ -30,13 +30,30 @@ import streamlit.components.v1 as components
 def js_close_sidebar():
     return """
     <script>
-        var sidebar = window.parent.document.querySelector('[data-testid="stSidebar"]');
-        if (sidebar) {
-            var closeBtn = sidebar.querySelector('button[kind="header"]');
-            if (closeBtn) { closeBtn.click(); }
+        try {
+            var doc = window.parent.document;
+
+            // 1. Hlavní pokus: Oficiální ID tlačítka pro sbalení (funguje v novém Streamlitu)
+            var closeBtn = doc.querySelector('[data-testid="stSidebarCollapseButton"]');
+
+            // 2. Fallback: Pokud selže, zkusíme najít první tlačítko uvnitř sidebaru (často je to křížek)
+            if (!closeBtn) {
+                var sidebar = doc.querySelector('[data-testid="stSidebar"]');
+                if (sidebar) {
+                    closeBtn = sidebar.querySelector('button');
+                }
+            }
+
+            // 3. Kliknutí (pokud jsme tlačítko našli)
+            if (closeBtn) {
+                closeBtn.click();
+            }
+        } catch (e) {
+            console.error("Chyba při zavírání sidebaru:", e);
         }
     </script>
     """
+
 
 # Streamlit page config MUST be the first Streamlit command
 # Sidebar state persistence (mobile-friendly)
