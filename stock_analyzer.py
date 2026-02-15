@@ -30,42 +30,70 @@ import streamlit.components.v1 as components
 def js_close_sidebar():
     return """
     <script>
-        // Zpoždění 300ms, aby měl Streamlit čas na překreslení UI po kliknutí
-        setTimeout(function() {
-            try {
-                var doc = window.parent.document;
-
-                // 1. Zkusíme najít tlačítko podle ARIA labelu (nejspolehlivější pro mobilní "X")
-                var btn = doc.querySelector('button[aria-label="Close sidebar"]');
-
-                // 2. Pokud není, zkusíme standardní desktopové tlačítko
-                if (!btn) {
-                    btn = doc.querySelector('[data-testid="stSidebarCollapseButton"]');
+        // Robust close for mobile + desktop Streamlit sidebar
+        (function() {
+            function findCloseButton(doc) {
+                const selectors = [
+                    'button[aria-label="Close sidebar"]',
+                    '[data-testid="stSidebarCollapseButton"]',
+                    '[data-testid="stSidebarToggleButton"]',
+                    'button[title="Close sidebar"]',
+                    'button[aria-label="Open sidebar"]' // toggle-style button (may close if open)
+                ];
+                for (const sel of selectors) {
+                    const el = doc.querySelector(sel);
+                    if (el) return el;
                 }
 
-                // 3. Fallback: První tlačítko v sekci sidebaru (pokud má ikonku křížku)
-                if (!btn) {
-                    var sidebar = doc.querySelector('section[data-testid="stSidebar"]');
-                    if (sidebar) {
-                        // Hledáme tlačítko v hlavičce sidebaru (obvykle první element)
-                        btn = sidebar.querySelector('button');
-                    }
+                // Fallback: first button in sidebar header/section
+                const sidebar = doc.querySelector('section[data-testid="stSidebar"], [data-testid="stSidebar"]');
+                if (sidebar) {
+                    const btn = sidebar.querySelector('button');
+                    if (btn) return btn;
                 }
 
-                // KLIKNUTÍ
-                if (btn) {
-                    btn.click();
-                    // Pro jistotu zkusíme kliknout znovu po chvíli (double tap fix pro některé mobily)
-                    setTimeout(function(){ btn.click() }, 100);
-                } else {
-                    console.log("Sidebar close button not found.");
+                // Fallback: first header button
+                const header = doc.querySelector('header');
+                if (header) {
+                    const btn = header.querySelector('button');
+                    if (btn) return btn;
                 }
-            } catch (e) {
-                console.error("Error closing sidebar:", e);
+
+                return null;
             }
-        }, 300); // 300ms delay
+
+            function tryClose() {
+                try {
+                    const doc = window.parent.document;
+                    const btn = findCloseButton(doc);
+                    if (btn) {
+                        btn.click();
+                        // some mobiles need double-tap
+                        setTimeout(() => { try { btn.click(); } catch(e) {} }, 120);
+                        return true;
+                    }
+                } catch (e) {
+                    console.error("Error closing sidebar:", e);
+                }
+                return false;
+            }
+
+            // Give Streamlit time to render after click + rerun
+            let attempts = 0;
+            const maxAttempts = 14;
+            const interval = setInterval(() => {
+                attempts++;
+                if (tryClose() || attempts >= maxAttempts) {
+                    clearInterval(interval);
+                }
+            }, 120);
+
+            // initial delay
+            setTimeout(() => { tryClose(); }, 300);
+        })();
     </script>
     """
+
 
 def _get_secret(name: str, default: str = "") -> str:
     try:
@@ -94,7 +122,7 @@ except Exception:
 APP_NAME = "Stock Picker Pro"
 APP_VERSION = "v2.0"
 
-GEMINI_MODEL = "gemini-2.5-flash-lite"
+GEMINI_MODEL = "gemini-2.0-flash-exp"
 
 
 
@@ -1382,6 +1410,15 @@ def main():
     if "selected_ticker" not in st.session_state:
         st.session_state.selected_ticker = ""
 
+    if "close_sidebar_js" not in st.session_state:
+        st.session_state.close_sidebar_js = False
+
+    # If requested (e.g., after clicking Analyze), inject JS in MAIN area to force-close the sidebar on mobile.
+    if st.session_state.get("close_sidebar_js"):
+        components.html(js_close_sidebar(), height=0, width=0)
+        st.session_state.close_sidebar_js = False
+
+
 
     # Page configuration is set at module import (must be first Streamlit command)
     
@@ -1496,8 +1533,8 @@ def main():
         analyze_btn = st.button("🔍 Analyzovat", type="primary", use_container_width=True)
 
         if analyze_btn:
-            # Zavři sidebar (mobil) + přepni do režimu RESULTS a okamžitě rerun,
-            # aby se úvodní tabulka/picker UI už nezobrazil.
+            # Request sidebar close (mobile drawer) and rerun into RESULTS mode.
+            st.session_state.close_sidebar_js = True
             components.html(js_close_sidebar(), height=0, width=0)
             st.session_state.ui_mode = "RESULTS"
             st.session_state.selected_ticker = ticker_input
