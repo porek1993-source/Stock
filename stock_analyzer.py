@@ -161,7 +161,7 @@ except Exception:
 APP_NAME = "Stock Picker Pro"
 APP_VERSION = "v2.0"
 
-GEMINI_MODEL = "gemini-2.0-flash-exp"
+GEMINI_MODEL = "gemini-2.5-flash-lite"
 
 
 
@@ -1425,7 +1425,11 @@ def estimate_smart_params(info: Dict[str, Any], metrics: Dict[str, "Metric"]) ->
 
     # STROP NÁSOBKU: Aby nám Microsoft neulétl na 35x
     # I tu nejlepší firmu v modelu prodáváme max za 25x FCF
-    exit_multiple = min(22.0, exit_multiple)
+    # STROP NÁSOBKU: Mega Caps konzervativně max 22x, ale "Super Quality" může jít výš
+    # Super Quality: profit margin > 30% a ROE > 30% (např. MSFT)
+    super_quality = (pm > 0.30 and roe > 0.30)
+    cap_multiple = 28.0 if super_quality else 22.0
+    exit_multiple = min(cap_multiple, exit_multiple)
 
     return {
         "wacc": float(wacc),
