@@ -150,7 +150,7 @@ except Exception:
 APP_NAME = "Stock Picker Pro"
 APP_VERSION = "v2.0"
 
-GEMINI_MODEL = "gemini-2.0-flash-exp"
+GEMINI_MODEL = "gemini-2.5-flash-lite"
 
 
 
@@ -1375,8 +1375,8 @@ def estimate_smart_params(info: Dict[str, Any], metrics: Dict[str, "Metric"]) ->
 
     # 4. STROP RŮSTU (Growth Cap) - Tady se krotí ty "brutální" čísla
     if is_mega_cap:
-        # Giganti nemohou růst o 20% věčně -> Cap 14%
-        growth_cap = 0.14
+        # Giganti nemohou růst o 20% věčně -> Cap 12%
+        growth_cap = 0.12
     elif is_large_cap:
         growth_cap = 0.18
     else:
@@ -1414,7 +1414,7 @@ def estimate_smart_params(info: Dict[str, Any], metrics: Dict[str, "Metric"]) ->
 
     # STROP NÁSOBKU: Aby nám Microsoft neulétl na 35x
     # I tu nejlepší firmu v modelu prodáváme max za 25x FCF
-    exit_multiple = min(25.0, exit_multiple)
+    exit_multiple = min(22.0, exit_multiple)
 
     return {
         "wacc": float(wacc),
@@ -1559,7 +1559,6 @@ def main():
         if analyze_btn:
             # Request sidebar close (mobile drawer) and rerun into RESULTS mode.
             st.session_state.close_sidebar_js = True
-            components.html(js_close_sidebar(), height=0, width=0)
             st.session_state.ui_mode = "RESULTS"
             st.session_state.selected_ticker = ticker_input
             st.session_state["last_ticker"] = ticker_input
