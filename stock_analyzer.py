@@ -25,6 +25,15 @@ import pandas as pd
 import yfinance as yf
 import streamlit as st
 import streamlit.components.v1 as components
+
+# Streamlit page config MUST be the first Streamlit command
+st.set_page_config(
+    page_title="Stock Picker Pro v2.0",
+    page_icon="📈",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
 # --- Secrets / API keys (Streamlit Cloud: use Secrets) ---
 def _get_secret(name: str, default: str = "") -> str:
     try:
@@ -240,6 +249,171 @@ def fetch_financials(ticker: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFr
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
+def get_fcf_ttm_yfinance(ticker: str, market_cap: Optional[float] = None) -> Tuple[Optional[float], List[str]]:
+    """Robustně spočítá roční Free Cash Flow (TTM) z yfinance quarterly_cashflow.
+
+    Pravidla:
+    - Primárně sečte poslední 4 dostupné kvartály (TTM).
+    - Když chybí řádek 'Free Cash Flow', spočítá FCF jako Operating Cash Flow - |CapEx|.
+    - Pokud jsou dostupná jen 1-3 kvartální čísla, annualizuje průměrem ×4.
+    - Sanity check: pro obří firmy (MarketCap > $1T) a podezřele nízké FCF (< $30B)
+      aplikuje pojistku násobení 4× (typicky když provider vrátí jen 1 kvartál).
+    - Vrací (fcf_ttm, dbg) kde dbg je list informativních zpráv.
+    """
+    dbg: List[str] = []
+    try:
+        t = yf.Ticker(ticker)
+        qcf = getattr(t, "quarterly_cashflow", None)
+        if qcf is None or not isinstance(qcf, pd.DataFrame) or qcf.empty:
+            dbg.append("FCF: quarterly_cashflow není k dispozici (prázdné). Zkouším fallback.")
+            qcf = pd.DataFrame()
+
+        def _pick_row(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+            if df is None or df.empty:
+                return None
+            idx = set(map(str, df.index))
+            for c in candidates:
+                if c in idx:
+                    return c
+            # zkus case-insensitive match
+            low_map = {str(i).strip().lower(): str(i) for i in df.index}
+            for c in candidates:
+                key = c.strip().lower()
+                if key in low_map:
+                    return low_map[key]
+            return None
+
+        def _sorted_quarter_cols(df: pd.DataFrame) -> List[Any]:
+            cols = list(df.columns)
+            if not cols:
+                return []
+            dts = pd.to_datetime(cols, errors="coerce")
+            if dts.notna().any():
+                order = sorted(range(len(cols)), key=lambda i: dts[i], reverse=True)
+                return [cols[i] for i in order]
+            return cols  # fallback: keep original order
+
+        # 1) vyber poslední dostupné kvartály
+        cols_sorted = _sorted_quarter_cols(qcf)
+        cols_sel = cols_sorted[:4] if cols_sorted else []
+        if cols_sel:
+            dbg.append(f"FCF: Načítám kvartály: {', '.join([str(c) for c in cols_sel])}")
+        else:
+            dbg.append("FCF: Nenalezeny žádné kvartální sloupce v quarterly_cashflow.")
+
+        # 2) primárně: přímý řádek Free Cash Flow
+        fcf_row = _pick_row(qcf, ["Free Cash Flow", "FreeCashFlow", "Free cash flow"])
+        used_method = None
+
+        fcf_quarters = None
+        non_null = 0
+
+        if fcf_row and cols_sel:
+            s = pd.to_numeric(qcf.loc[fcf_row, cols_sel], errors="coerce")
+            non_null = int(s.notna().sum())
+            if non_null > 0:
+                fcf_quarters = s
+                used_method = f"quarterly row '{fcf_row}'"
+        # 3) fallback: OCF - |CapEx|
+        if fcf_quarters is None and cols_sel:
+            ocf_row = _pick_row(qcf, [
+                "Operating Cash Flow",
+                "Total Cash From Operating Activities",
+                "Total Cash From Operating Activities (Continuing Operations)",
+                "Cash Flow From Continuing Operating Activities",
+                "Net Cash Provided By Operating Activities",
+            ])
+            capex_row = _pick_row(qcf, [
+                "Capital Expenditures",
+                "Capital Expenditure",
+                "CapitalExpenditures",
+                "Purchase Of PPE",
+                "Purchase of Property Plant Equipment",
+            ])
+            if ocf_row and capex_row:
+                ocf = pd.to_numeric(qcf.loc[ocf_row, cols_sel], errors="coerce")
+                capex = pd.to_numeric(qcf.loc[capex_row, cols_sel], errors="coerce")
+                non_null = int((ocf.notna() & capex.notna()).sum())
+                if non_null > 0:
+                    # CapEx bývá záporný; chceme: FCF = OCF - |CapEx|
+                    fcf_quarters = ocf - capex.abs()
+                    used_method = f"computed: '{ocf_row}' - |'{capex_row}'|"
+
+        # 4) pokud pořád nic, fallback na annual cashflow / info
+        if fcf_quarters is None:
+            # annual cashflow
+            acf = getattr(t, "cashflow", None)
+            if isinstance(acf, pd.DataFrame) and not acf.empty:
+                acf_cols = _sorted_quarter_cols(acf)[:1]  # nejnovější rok
+                fcf_row_a = _pick_row(acf, ["Free Cash Flow", "FreeCashFlow", "Free cash flow"])
+                if fcf_row_a and acf_cols:
+                    v = safe_float(acf.loc[fcf_row_a, acf_cols[0]])
+                    if v is not None:
+                        dbg.append("FCF: Používám annual cashflow (nejnovější rok) – řádek Free Cash Flow.")
+                        used_method = "annual row 'Free Cash Flow'"
+                        fcf_ttm = float(v)
+                        msg = f"Použité roční FCF (TTM): ${fcf_ttm/1e9:.1f} miliard ({used_method})"
+                        dbg.append(msg)
+                        print(msg)
+                        return fcf_ttm, dbg
+
+            # last resort: info['freeCashflow']
+            try:
+                info = getattr(t, "info", None) or {}
+            except Exception:
+                info = {}
+            v = safe_float(info.get("freeCashflow"))
+            if v is not None:
+                used_method = "info['freeCashflow'] (fallback)"
+                fcf_ttm = float(v)
+                msg = f"Použité roční FCF (TTM): ${fcf_ttm/1e9:.1f} miliard ({used_method})"
+                dbg.append(msg)
+                print(msg)
+                return fcf_ttm, dbg
+
+            dbg.append("FCF: Nepodařilo se získat FCF ani z quarterly ani z annual ani z info.")
+            return None, dbg
+
+        # 5) TTM / extrapolace
+        fcf_vals = pd.to_numeric(fcf_quarters, errors="coerce").dropna()
+        n = int(fcf_vals.shape[0])
+        applied_extrap = False
+        used_sum4 = False
+
+        if n >= 4:
+            fcf_ttm = float(fcf_vals.iloc[:4].sum())
+            used_sum4 = True
+        elif n > 0:
+            # annualizace průměrem ×4
+            fcf_ttm = float(fcf_vals.mean() * 4.0)
+            applied_extrap = True
+        else:
+            dbg.append("FCF: kvartální hodnoty jsou všechny NaN.")
+            return None, dbg
+
+        # 6) Sanity check (market cap > 1T & FCF < 30B) -> 4×
+        mc = safe_float(market_cap)
+        if (not applied_extrap) and used_sum4 and mc and mc > 1e12 and fcf_ttm < 30e9:
+            fcf_ttm *= 4.0
+            dbg.append("FCF: Sanity check aktivován (MarketCap > $1T a FCF < $30B) -> násobím 4× (podezření na 1 kvartál).")
+
+        # 7) Debug zprávy
+        if used_method:
+            dbg.append(f"FCF metoda: {used_method}. Kvartály použity: {n}.")
+        if applied_extrap:
+            dbg.append(f"FCF: Extrapolace do roční báze (k dispozici {n} kvartály) -> průměr ×4.")
+        if used_sum4:
+            dbg.append("FCF: TTM = součet posledních 4 kvartálů.")
+
+        msg = f"Použité roční FCF (TTM): ${fcf_ttm/1e9:.1f} miliard"
+        dbg.append(msg)
+        print(msg)
+
+        return fcf_ttm, dbg
+    except Exception as e:
+        dbg.append(f"FCF: chyba při výpočtu TTM: {e}")
+        return None, dbg
+@st.cache_data(show_spinner=False, ttl=3600)
 def get_all_time_high(ticker: str) -> Optional[float]:
     """Get all-time high price."""
     try:
@@ -314,9 +488,9 @@ def extract_metrics(info: Dict[str, Any], ticker: str) -> Dict[str, Metric]:
     total_debt = safe_float(info.get("totalDebt"))
     
     # Cash flow
-    fcf = safe_float(info.get("freeCashflow"))
     operating_cashflow = safe_float(info.get("operatingCashflow"))
     market_cap = safe_float(info.get("marketCap"))
+    fcf, _fcf_dbg = get_fcf_ttm_yfinance(ticker, market_cap)
     fcf_yield = safe_div(fcf, market_cap) if fcf and market_cap else None
     
     # Analyst targets
@@ -686,13 +860,17 @@ def fetch_peer_comparison(ticker: str, peers: List[str]) -> pd.DataFrame:
             if not info:
                 continue
             
+            mc = safe_float(info.get("marketCap"))
+            fcf_ttm_peer, _ = get_fcf_ttm_yfinance(t, mc)
+            fcf_yield_peer = safe_div(fcf_ttm_peer, mc) if fcf_ttm_peer and mc else None
+
             rows.append({
                 "Ticker": t,
                 "P/E": safe_float(info.get("trailingPE")),
                 "Op. Margin": safe_float(info.get("operatingMargins")),
                 "Rev. Growth": safe_float(info.get("revenueGrowth")),
-                "FCF Yield": safe_div(safe_float(info.get("freeCashflow")), safe_float(info.get("marketCap"))),
-                "Market Cap": safe_float(info.get("marketCap")),
+                "FCF Yield": fcf_yield_peer,
+                "Market Cap": mc,
             })
         except Exception:
             continue
@@ -1053,13 +1231,7 @@ TEXT:
 def main():
     """Main application entry point."""
     
-    # Page configuration - WIDE LAYOUT
-    st.set_page_config(
-        page_title="Stock Picker Pro v2.0",
-        page_icon="📈",
-        layout="wide",
-        initial_sidebar_state="expanded"
-    )
+    # Page configuration is set at module import (must be first Streamlit command)
     
     # Custom CSS
     st.markdown("""
@@ -1195,6 +1367,11 @@ def main():
                 3, 10, 5, 1,
                 help="Počet let pro projekci FCF"
             )
+            dcf_exit_multiple = st.slider(
+                "Exit Multiple (FCF)",
+                10.0, 50.0, 25.0, 1.0,
+                help="Násobek FCF v posledním projektovaném roce pro terminal value (Exit Multiple metoda)"
+            )
         
         st.markdown("---")
         
@@ -1250,7 +1427,10 @@ def main():
         insider_signal = compute_insider_pro_signal(insider_df)
         
         # DCF calculations
-        fcf = safe_float(info.get("freeCashflow"))
+        market_cap_for_fcf = safe_float(info.get("marketCap"))
+        fcf, fcf_dbg = get_fcf_ttm_yfinance(ticker, market_cap_for_fcf)
+        for _m in (fcf_dbg or []):
+            print(_m)
         shares = safe_float(info.get("sharesOutstanding"))
         current_price = metrics.get("price").value if metrics.get("price") else None
         
@@ -1273,7 +1453,7 @@ def main():
             
             # 2. Terminal Value (Hodnota na konci 5. roku)
             # Použijeme Exit Multiple (pro Big Tech standardně 25x, ne konzervativní Gordon)
-            exit_multiple = 25.0
+            exit_multiple = float(dcf_exit_multiple)
             terminal_value = future_fcf[-1] * exit_multiple
             
             # 3. Diskontování na dnešní hodnotu (PV)
