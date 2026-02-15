@@ -30,41 +30,43 @@ import streamlit.components.v1 as components
 def js_close_sidebar():
     return """
     <script>
-        try {
-            var doc = window.parent.document;
+        // Zpoždění 300ms, aby měl Streamlit čas na překreslení UI po kliknutí
+        setTimeout(function() {
+            try {
+                var doc = window.parent.document;
 
-            // 1. Hlavní pokus: Oficiální ID tlačítka pro sbalení (funguje v novém Streamlitu)
-            var closeBtn = doc.querySelector('[data-testid="stSidebarCollapseButton"]');
+                // 1. Zkusíme najít tlačítko podle ARIA labelu (nejspolehlivější pro mobilní "X")
+                var btn = doc.querySelector('button[aria-label="Close sidebar"]');
 
-            // 2. Fallback: Pokud selže, zkusíme najít první tlačítko uvnitř sidebaru (často je to křížek)
-            if (!closeBtn) {
-                var sidebar = doc.querySelector('[data-testid="stSidebar"]');
-                if (sidebar) {
-                    closeBtn = sidebar.querySelector('button');
+                // 2. Pokud není, zkusíme standardní desktopové tlačítko
+                if (!btn) {
+                    btn = doc.querySelector('[data-testid="stSidebarCollapseButton"]');
                 }
-            }
 
-            // 3. Kliknutí (pokud jsme tlačítko našli)
-            if (closeBtn) {
-                closeBtn.click();
+                // 3. Fallback: První tlačítko v sekci sidebaru (pokud má ikonku křížku)
+                if (!btn) {
+                    var sidebar = doc.querySelector('section[data-testid="stSidebar"]');
+                    if (sidebar) {
+                        // Hledáme tlačítko v hlavičce sidebaru (obvykle první element)
+                        btn = sidebar.querySelector('button');
+                    }
+                }
+
+                // KLIKNUTÍ
+                if (btn) {
+                    btn.click();
+                    // Pro jistotu zkusíme kliknout znovu po chvíli (double tap fix pro některé mobily)
+                    setTimeout(function(){ btn.click() }, 100);
+                } else {
+                    console.log("Sidebar close button not found.");
+                }
+            } catch (e) {
+                console.error("Error closing sidebar:", e);
             }
-        } catch (e) {
-            console.error("Chyba při zavírání sidebaru:", e);
-        }
+        }, 300); // 300ms delay
     </script>
     """
 
-
-# Streamlit page config MUST be the first Streamlit command
-# Sidebar state persistence (mobile-friendly)
-st.set_page_config(
-    page_title="Stock Picker Pro v2.0",
-    page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-# --- Secrets / API keys (Streamlit Cloud: use Secrets) ---
 def _get_secret(name: str, default: str = "") -> str:
     try:
         # Streamlit Cloud secrets
