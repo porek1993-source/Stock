@@ -1541,7 +1541,7 @@ def main():
         # Decide DCF inputs (Smart vs Manual)
         used_dcf_growth = float(dcf_growth)
         used_dcf_wacc = float(dcf_wacc)
-        used_exit_multiple = float(used_exit_multiple)
+        used_exit_multiple = float(dcf_exit_multiple)
         used_mode_label = "Manual"
 
         if st.session_state.get("smart_dcf", True):
@@ -1570,7 +1570,7 @@ def main():
             
             # 2. Terminal Value (Hodnota na konci 5. roku)
             # Použijeme Exit Multiple (pro Big Tech standardně 25x, ne konzervativní Gordon)
-            exit_multiple = float(dcf_exit_multiple)
+            exit_multiple = float(used_exit_multiple)
             terminal_value = future_fcf[-1] * exit_multiple
             
             # 3. Diskontování na dnešní hodnotu (PV)
