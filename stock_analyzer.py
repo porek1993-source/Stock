@@ -27,12 +27,24 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 # Streamlit page config MUST be the first Streamlit command
+# NOTE: We must not call any Streamlit APIs (including st.session_state) before set_page_config,
+# otherwise Streamlit may raise an error. We persist the desired sidebar state via an env var
+# and then mirror it into st.session_state after configuration.
+_SIDEBAR_STATE = os.environ.get("STOCK_PICKER_SIDEBAR_STATE", "expanded")
+if _SIDEBAR_STATE not in ("expanded", "collapsed", "auto"):
+    _SIDEBAR_STATE = "expanded"
+
 st.set_page_config(
     page_title="Stock Picker Pro v2.0",
     page_icon="📈",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state=_SIDEBAR_STATE,
 )
+
+# Initialize sidebar state in session_state (after set_page_config to keep config first)
+if "sidebar_state" not in st.session_state:
+    st.session_state.sidebar_state = _SIDEBAR_STATE
+
 
 # --- Secrets / API keys (Streamlit Cloud: use Secrets) ---
 def _get_secret(name: str, default: str = "") -> str:
@@ -709,6 +721,11 @@ def reverse_dcf_implied_growth(
 def estimate_smart_params(info: Dict[str, Any], metrics: Dict[str, "Metric"]) -> Dict[str, float]:
     """Estimate smart DCF parameters from Yahoo Finance info and extracted metrics.
 
+    Logic:
+      - WACC (discount) from beta: RiskFree 4.2% + Beta * 5%, clamped to 8%..15% (fallback 10%)
+      - Growth from avg(revenue_growth, earnings_growth), clamped to 2%..(15% for mega-caps, else 25%)
+      - Exit multiple by sector; mega-cap Tech/Communication uses a more conservative 20x
+
     Returns:
         {
             "wacc": float,
@@ -716,6 +733,10 @@ def estimate_smart_params(info: Dict[str, Any], metrics: Dict[str, "Metric"]) ->
             "exit_multiple": float,
         }
     """
+    # --- Market Cap & Mega Cap flag ---
+    market_cap = safe_float(info.get("marketCap"))
+    is_mega_cap = bool(market_cap is not None and market_cap > 200e9)
+
     # --- WACC from Beta ---
     beta = safe_float(info.get("beta"))
     if beta is None:
@@ -723,8 +744,9 @@ def estimate_smart_params(info: Dict[str, Any], metrics: Dict[str, "Metric"]) ->
     else:
         # RiskFree 4.2% + Beta * 5%
         wacc = 0.042 + (beta * 0.05)
-    # Clamp to 6% - 15%
-    wacc = max(0.06, min(0.15, wacc))
+
+    # Clamp to 8% - 15% (raise floor to avoid underestimating risk)
+    wacc = max(0.08, min(0.15, wacc))
 
     # --- Growth from Revenue + Earnings growth ---
     def _mval(key: str) -> Optional[float]:
@@ -739,18 +761,26 @@ def estimate_smart_params(info: Dict[str, Any], metrics: Dict[str, "Metric"]) ->
 
     rg = _mval("revenue_growth")
     eg = _mval("earnings_growth")
-    vals = [v for v in [rg, eg] if v is not None]
+    vals = [v for v in (rg, eg) if v is not None]
+
     if vals:
         growth = float(sum(vals) / len(vals))
     else:
         growth = 0.10
-    # Clamp to 2% - 25%
-    growth = max(0.02, min(0.25, growth))
+
+    # Clamp to 2% - cap (mega caps max 15%, others max 25%)
+    growth_cap = 0.15 if is_mega_cap else 0.25
+    growth = max(0.02, min(growth_cap, growth))
 
     # --- Exit Multiple by sector ---
     sector = (info.get("sector") or "").lower()
-    if "technology" in sector:
+
+    if "technology" in sector or "communication" in sector:
+        # Default Tech/Communication multiple
         exit_multiple = 25.0
+        # Mega-cap Tech/Communication: more conservative multiple
+        if is_mega_cap:
+            exit_multiple = 20.0
     elif "financial" in sector:
         exit_multiple = 12.0
     elif "health" in sector:
@@ -759,6 +789,7 @@ def estimate_smart_params(info: Dict[str, Any], metrics: Dict[str, "Metric"]) ->
         exit_multiple = 15.0
 
     return {"wacc": wacc, "growth": growth, "exit_multiple": exit_multiple}
+
 # ============================================================================
 # INSIDER TRADING ANALYSIS
 # ============================================================================
@@ -1427,10 +1458,17 @@ def main():
             max_chars=10
         ).upper().strip()
         
-        analyze_btn = st.button("🔍 Analyzovat", type="primary", use_container_width=True)
-        if analyze_btn:
-            st.session_state["_collapse_sidebar_once"] = True
-        
+        def close_sidebar():
+            st.session_state.sidebar_state = "collapsed"
+            os.environ["STOCK_PICKER_SIDEBAR_STATE"] = "collapsed"
+
+        analyze_btn = st.button(
+            "🔍 Analyzovat",
+            type="primary",
+            use_container_width=True,
+            on_click=close_sidebar,
+        )
+
         st.markdown("---")
         
         # DCF Settings
@@ -1494,28 +1532,6 @@ def main():
     # MAIN CONTENT
     # ========================================================================
     
-        # Auto-collapse sidebar after clicking Analyze (useful on mobile)
-    if st.session_state.get("_collapse_sidebar_once"):
-        components.html(
-            """
-            <script>
-            (function() {
-              const tryCollapse = () => {
-                const doc = window.parent.document;
-                const btn = doc.querySelector('button[data-testid="stSidebarCollapseButton"]')
-                          || doc.querySelector('button[aria-label="Close sidebar"]')
-                          || doc.querySelector('button[title="Close sidebar"]');
-                if (btn) btn.click();
-              };
-              setTimeout(tryCollapse, 150);
-              setTimeout(tryCollapse, 500);
-              setTimeout(tryCollapse, 1200);
-            })();
-            </script>
-            """,
-            height=0,
-        )
-        st.session_state["_collapse_sidebar_once"] = False
 
 # Welcome screen if no analysis yet
     if not analyze_btn and "last_ticker" not in st.session_state:
