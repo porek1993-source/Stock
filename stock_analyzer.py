@@ -27,17 +27,7 @@ import streamlit as st
 
 import streamlit as st
 
-hide_st_style = """
-            <style>
-            #MainMenu {visibility: hidden;}
-            footer {visibility: hidden;}
-            header {visibility: hidden;}
-            /* Toto skryje specifické prvky vpravo dole v Streamlit Cloud */
-            .stAppDeployButton {display:none;}
-            button[title="View source code"] {display:none;}
-            </style>
-            """
-st.markdown(hide_st_style, unsafe_allow_html=True)
+
 # --- Secrets / API keys (Streamlit Cloud: use Secrets) ---
 def _get_secret(name: str, default: str = "") -> str:
     try:
