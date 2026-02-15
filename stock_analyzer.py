@@ -224,6 +224,129 @@ def fetch_financials(ticker: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFr
     except Exception:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
+@st.cache_data(show_spinner=False, ttl=3600)
+def fetch_fcf_ttm_details(ticker: str) -> Dict[str, Any]:
+    """    Robustní výpočet Free Cash Flow za posledních 12 měsíců (TTM).
+
+    Primární logika (dle zadání):
+    - stáhne quarterly_cashflow
+    - vezme poslední 4 kvartály položky 'Free Cash Flow' a sečte je
+
+    Fallbacky:
+    - pokud 'Free Cash Flow' chybí, spočítá FCF jako Operating Cash Flow - Capital Expenditure
+    - pokud chybí kvartální data, zkusí annual cashflow
+    - nakonec fallback na info['freeCashflow'] (může být nepřesné)
+
+    Returns:
+        {
+          'fcf_ttm': float | None,
+          'method': str,
+          'quarters_used': int
+        }
+    """
+
+    def _norm(s: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", str(s).lower())
+
+    def _find_row(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+        if df is None or df.empty:
+            return None
+        # Exact match
+        for c in candidates:
+            if c in df.index:
+                return c
+        # Normalized match
+        norm_map = {_norm(i): i for i in df.index}
+        for c in candidates:
+            k = _norm(c)
+            if k in norm_map:
+                return norm_map[k]
+        # Heuristic contains
+        for i in df.index:
+            k = _norm(i)
+            if "freecashflow" in k:
+                return i
+        return None
+
+    def _sorted_cols(df: pd.DataFrame) -> List[Any]:
+        cols = list(df.columns)
+        dts = []
+        ok = 0
+        for c in cols:
+            try:
+                d = pd.to_datetime(c)
+                dts.append(d)
+                ok += 1
+            except Exception:
+                dts.append(None)
+        if ok >= max(1, len(cols)//2):
+            pairs = [(d, c) for d, c in zip(dts, cols) if d is not None]
+            pairs.sort(key=lambda x: x[0], reverse=True)
+            return [c for _, c in pairs]
+        # Fallback: keep original order (yfinance usually returns newest first)
+        return cols
+
+    try:
+        t = yf.Ticker(ticker)
+
+        qcf = getattr(t, "quarterly_cashflow", None)
+        if qcf is not None and not qcf.empty:
+            cols = _sorted_cols(qcf)
+
+            row_fcf = _find_row(qcf, ["Free Cash Flow", "FreeCashFlow", "Free Cashflow"]) 
+            if row_fcf is not None:
+                s = pd.to_numeric(qcf.loc[row_fcf, cols], errors="coerce").dropna()
+                if len(s) >= 4:
+                    fcf_ttm = float(s.iloc[:4].sum())
+                    return {"fcf_ttm": fcf_ttm, "method": "quarterly_free_cash_flow_row", "quarters_used": 4}
+
+            # Fallback: OCF - CapEx
+            row_ocf = _find_row(qcf, [
+                "Operating Cash Flow",
+                "Total Cash From Operating Activities",
+                "Cash Flow From Continuing Operating Activities",
+            ])
+            row_capex = _find_row(qcf, ["Capital Expenditure", "Capital Expenditures"])
+
+            if row_ocf is not None and row_capex is not None:
+                ocf = pd.to_numeric(qcf.loc[row_ocf, cols], errors="coerce")
+                capex = pd.to_numeric(qcf.loc[row_capex, cols], errors="coerce")
+                fcf_series = (ocf - capex).dropna()
+                if len(fcf_series) >= 4:
+                    fcf_ttm = float(fcf_series.iloc[:4].sum())
+                    return {"fcf_ttm": fcf_ttm, "method": "quarterly_ocf_minus_capex", "quarters_used": 4}
+
+        # Annual fallback
+        acf = getattr(t, "cashflow", None)
+        if acf is not None and not acf.empty:
+            cols = _sorted_cols(acf)
+            row_fcf = _find_row(acf, ["Free Cash Flow", "FreeCashFlow", "Free Cashflow"]) 
+            if row_fcf is not None:
+                s = pd.to_numeric(acf.loc[row_fcf, cols], errors="coerce").dropna()
+                if not s.empty:
+                    return {"fcf_ttm": float(s.iloc[0]), "method": "annual_free_cash_flow_row", "quarters_used": 0}
+
+            row_ocf = _find_row(acf, [
+                "Operating Cash Flow",
+                "Total Cash From Operating Activities",
+                "Cash Flow From Continuing Operating Activities",
+            ])
+            row_capex = _find_row(acf, ["Capital Expenditure", "Capital Expenditures"])
+            if row_ocf is not None and row_capex is not None:
+                ocf = pd.to_numeric(acf.loc[row_ocf, cols], errors="coerce")
+                capex = pd.to_numeric(acf.loc[row_capex, cols], errors="coerce")
+                f = (ocf - capex).dropna()
+                if not f.empty:
+                    return {"fcf_ttm": float(f.iloc[0]), "method": "annual_ocf_minus_capex", "quarters_used": 0}
+
+        # Last-resort fallback
+        info = getattr(t, "info", {}) or {}
+        fcf = safe_float(info.get("freeCashflow"))
+        return {"fcf_ttm": fcf, "method": "info_freeCashflow_fallback", "quarters_used": 0}
+
+    except Exception:
+        return {"fcf_ttm": None, "method": "error", "quarters_used": 0}
+
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def get_all_time_high(ticker: str) -> Optional[float]:
@@ -677,7 +800,7 @@ def fetch_peer_comparison(ticker: str, peers: List[str]) -> pd.DataFrame:
                 "P/E": safe_float(info.get("trailingPE")),
                 "Op. Margin": safe_float(info.get("operatingMargins")),
                 "Rev. Growth": safe_float(info.get("revenueGrowth")),
-                "FCF Yield": safe_div(safe_float(info.get("freeCashflow")), safe_float(info.get("marketCap"))),
+                "FCF Yield": safe_div(safe_float(fetch_fcf_ttm_details(t).get("fcf_ttm")), safe_float(info.get("marketCap"))),
                 "Market Cap": safe_float(info.get("marketCap")),
             })
         except Exception:
@@ -1177,9 +1300,21 @@ def main():
         insider_signal = compute_insider_pro_signal(insider_df)
         
         # DCF calculations
-        fcf = safe_float(info.get("freeCashflow"))
+        fcf_details = fetch_fcf_ttm_details(ticker)
+        fcf = safe_float(fcf_details.get('fcf_ttm'))
+        # Debug: print do konzole (Streamlit Cloud logs)
+        if fcf is not None:
+            print(f"Použité roční FCF (TTM): ${fcf/1e9:.1f} miliard")
         shares = safe_float(info.get("sharesOutstanding"))
         current_price = metrics.get("price").value if metrics.get("price") else None
+
+        # Použij FCF (TTM) i pro FCF yield metriku (kvůli skóre / peer srovnání)
+        try:
+            mc = safe_float(info.get('marketCap'))
+            if 'fcf_yield' in metrics and mc and fcf and mc > 0:
+                metrics['fcf_yield'].value = safe_div(fcf, mc)
+        except Exception:
+            pass
         
         fair_value_dcf = None
         mos_dcf = None
