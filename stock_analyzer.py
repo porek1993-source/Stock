@@ -1043,249 +1043,150 @@ def _on_analyze_click():
 def main():
     """Main application entry point."""
     
+    # --- 1. LOGIKA STAVU SIDEBARU ---
+    # Inicializace stavu (aby si pamatoval, zda má být menu otevřené/zavřené)
+    if "sidebar_state" not in st.session_state:
+        st.session_state["sidebar_state"] = "expanded"
 
-# ---- Sidebar visibility (mobile) ----
-if "show_sidebar" not in st.session_state:
-    st.session_state["show_sidebar"] = True
+    # Callback funkce: Když klikneš, nastaví stav na "collapsed" (zavřeno)
+    def _hide_sidebar():
+        st.session_state["sidebar_state"] = "collapsed"
 
-# Apply sidebar CSS early (before rendering sidebar widgets) so it takes effect on the same rerun
-if not st.session_state.get("show_sidebar", True):
-    st.markdown(
-        """
-        <style>
-          /* Hide sidebar completely */
-          section[data-testid="stSidebar"] { display: none !important; }
-          /* Ex
-    analyze_requested = bool(st.session_state.get("_analyze_requested", False))
-    if analyze_requested:
-        # clear the flag immediately to avoid repeated reruns
-        st.session_state["_analyze_requested"] = False
-pand main content when sidebar hidden */
-          div[data-testid="stAppViewContainer"] { margin-left: 0 !important; }
-        </style>
-        """,
-        unsafe_allow_html=True
-    )
-    # Page configuration - WIDE LAYOUT
+    def _show_sidebar():
+        st.session_state["sidebar_state"] = "expanded"
+
+    # --- 2. KONFIGURACE STRÁNKY ---
+    # Toto aplikuje stav (otevřeno/zavřeno) hned při načtení
     st.set_page_config(
         page_title="Stock Picker Pro v2.0",
         page_icon="📈",
         layout="wide",
-        initial_sidebar_state="expanded"
+        initial_sidebar_state=st.session_state["sidebar_state"]
     )
 
-    # Sidebar UX (mobile-friendly): allow hiding the sidebar after pressing "Analyzovat".
-    if "sidebar_visible" not in st.session_state:
-        st.session_state["sidebar_visible"] = True
-
-    def _hide_sidebar() -> None:
-        st.session_state["sidebar_visible"] = False
-
-    def _show_sidebar() -> None:
-        st.session_state["sidebar_visible"] = True
-    
-    # Custom CSS
+    # --- 3. CSS A STYLY ---
     st.markdown("""
     <style>
-        /* Mobile-friendly spacing */
-        .stButton > button {
-            width: 100%;
-            margin: 5px 0;
-            min-height: 44px;
-        }
+        /* Tlačítka a inputy */
+        .stButton > button { width: 100%; margin: 5px 0; min-height: 44px; }
         
-        /* Responsive metrics */
-        [data-testid="stMetricValue"] {
-            font-size: clamp(1.2rem, 4vw, 2rem);
-        }
-        
-        /* Smart header cards */
+        /* Metriky a karty */
+        [data-testid="stMetricValue"] { font-size: clamp(1.2rem, 4vw, 2rem); }
         .metric-card {
-            padding: 15px;
-            border-radius: 10px;
+            padding: 15px; border-radius: 10px;
             border: 1px solid rgba(255, 255, 255, 0.1);
-            background: rgba(255, 255, 255, 0.03);
-            margin-bottom: 10px;
+            background: rgba(255, 255, 255, 0.03); margin-bottom: 10px;
         }
+        .metric-label { font-size: 0.85rem; opacity: 0.7; margin-bottom: 5px; }
+        .metric-value { font-size: clamp(1.5rem, 5vw, 2.5rem); font-weight: 700; }
+        .metric-delta { font-size: 0.9rem; margin-top: 3px; }
         
-        .metric-label {
-            font-size: 0.85rem;
-            opacity: 0.7;
-            margin-bottom: 5px;
-        }
-        
-        .metric-value {
-            font-size: clamp(1.5rem, 5vw, 2.5rem);
-            font-weight: 700;
-        }
-        
-        .metric-delta {
-            font-size: 0.9rem;
-            margin-top: 3px;
-        }
-        
-        /* Responsive tables */
-        .dataframe {
-            font-size: clamp(0.75rem, 2vw, 0.95rem);
-        }
-        
-        /* Sidebar styling */
+        /* Styl sidebaru */
         section[data-testid="stSidebar"] {
             background: linear-gradient(180deg, rgba(0,0,0,0.03) 0%, rgba(0,0,0,0.01) 100%);
         }
         
-        /* Warning boxes */
-        .warning-box {
-            padding: 15px;
-            border-left: 4px solid #ff8800;
-            background: rgba(255, 136, 0, 0.1);
-            border-radius: 5px;
-            margin: 10px 0;
-        }
+        /* Boxíky pro verdikty */
+        .warning-box { padding: 15px; border-left: 4px solid #ff8800; background: rgba(255, 136, 0, 0.1); border-radius: 5px; margin: 10px 0; }
+        .success-box { padding: 15px; border-left: 4px solid #00ff88; background: rgba(0, 255, 136, 0.1); border-radius: 5px; margin: 10px 0; }
+        .section-header { font-size: 1.5rem; font-weight: 700; margin: 20px 0 10px 0; padding-bottom: 10px; border-bottom: 2px solid rgba(255, 255, 255, 0.1); }
         
-        /* Success boxes */
-        .success-box {
-            padding: 15px;
-            border-left: 4px solid #00ff88;
-            background: rgba(0, 255, 136, 0.1);
-            border-radius: 5px;
-            margin: 10px 0;
+        /* Mobilní fix: tmavé pozadí menu */
+        @media (max-width: 768px){
+          section[data-testid="stSidebar"]{
+            background: rgba(15,23,42,0.995)!important;
+          }
         }
-        
-        /* Section headers */
-        .section-header {
-            font-size: 1.5rem;
-            font-weight: 700;
-            margin: 20px 0 10px 0;
-            padding-bottom: 10px;
-            border-bottom: 2px solid rgba(255, 255, 255, 0.1);
-        }
-    
-@media (max-width: 768px){
-  section[data-testid="stSidebar"]{
-    background: rgba(15,23,42,0.995)!important;
-    backdrop-filter: none!important;
-    -webkit-backdrop-filter: none!important;
-  }
-  /* Ensure sidebar content readable on mobile */
-  section[data-testid="stSidebar"] *{
-    color: #e5e7eb;
-  }
-}
-</style>
+    </style>
     """, unsafe_allow_html=True)
-
-    # When hidden, fully remove sidebar overlay (helps on mobile so content isn't blocked).
-    if not st.session_state.get("sidebar_visible", True):
+    
+    # CSS pojistka: pokud je stav collapsed, schováme i ovládací prvky (čistší vzhled)
+    if st.session_state["sidebar_state"] == "collapsed":
         st.markdown(
             """
             <style>
-              [data-testid="stSidebar"], section[data-testid="stSidebar"] { display: none !important; }
-              [data-testid="collapsedControl"] { display: none !important; }
+            [data-testid="collapsedControl"] { display: none !important; }
             </style>
             """,
             unsafe_allow_html=True,
         )
-    
+
     # ========================================================================
-    # SIDEBAR - Settings & Controls
+    # SIDEBAR - OBSAH
     # ========================================================================
 
-    # If the sidebar is hidden (after analyze), show a compact button to bring it back.
-    if not st.session_state.get("sidebar_visible", True):
+    # Tlačítko "Menu" v hlavním okně (zobrazí se jen když je sidebar zavřený)
+    if st.session_state["sidebar_state"] == "collapsed":
         st.button("☰ Menu", key="open_menu_btn", on_click=_show_sidebar)
 
-    # Defaults (so the app keeps working even when sidebar is hidden)
-    ticker_input = st.session_state.get("ticker_selected", "AAPL")
+    # Defaultní hodnoty
     analyze_btn = False
+    
+    # Načtení parametrů (pamatuje si hodnoty i po reloadu)
     dcf_growth = st.session_state.get("dcf_growth", 0.10)
     dcf_terminal = st.session_state.get("dcf_terminal", 0.03)
     dcf_wacc = st.session_state.get("dcf_wacc", 0.10)
     dcf_years = st.session_state.get("dcf_years", 5)
     use_ai = st.session_state.get("use_ai", bool(GEMINI_API_KEY))
 
-    if st.session_state.get("sidebar_visible", True):
-        with st.sidebar:
-            st.title("📈 Stock Picker Pro")
-            st.caption("v2.0 - Advanced Quant Analysis")
-            st.markdown("---")
+    # Vykreslení Sidebaru
+    with st.sidebar:
+        st.title("📈 Stock Picker Pro")
+        st.caption("v2.0 - Advanced Quant Analysis")
+        st.markdown("---")
 
-            # Ticker input
-            ticker_input = st.text_input(
-                "Ticker Symbol",
-                value="AAPL",
-                help="Zadej ticker (např. AAPL, MSFT, GOOGL)",
-                max_chars=10,
-            ).upper().strip()
+        # Vstup pro Ticker
+        ticker_input = st.text_input(
+            "Ticker Symbol",
+            value=st.session_state.get("last_ticker", "AAPL"), # Pamatuje si poslední
+            help="Zadej ticker (např. AAPL, MSFT, GOOGL)",
+            max_chars=10,
+        ).upper().strip()
 
-            analyze_btn = st.button(
-                "🔍 Analyzovat",
-                type="primary",
-                use_container_width=True,
-                key="analyze_btn",
-                on_click=_hide_sidebar,
-            )
+        # HLAVNÍ TLAČÍTKO: Volá _hide_sidebar, což zavře menu!
+        analyze_btn = st.button(
+            "🔍 Analyzovat",
+            type="primary",
+            use_container_width=True,
+            key="analyze_btn",
+            on_click=_hide_sidebar, 
+        )
 
-            st.markdown("---")
+        st.markdown("---")
+        
+        # Nastavení DCF
+        with st.expander("⚙️ DCF Parametry", expanded=False):
+            dcf_growth = st.slider("Růst FCF (roční)", 0.0, 0.50, dcf_growth, 0.01)
+            dcf_terminal = st.slider("Terminální růst", 0.0, 0.10, dcf_terminal, 0.01)
+            dcf_wacc = st.slider("WACC (diskont)", 0.05, 0.20, dcf_wacc, 0.01)
+            dcf_years = st.slider("Projektované roky", 3, 10, dcf_years, 1)
 
-            # DCF Settings
-            with st.expander("⚙️ DCF Parametry", expanded=False):
-                dcf_growth = st.slider(
-                    "Růst FCF (roční)",
-                    0.0, 0.50, 0.10, 0.01,
-                    help="Očekávaný roční růst Free Cash Flow",
-                )
-                dcf_terminal = st.slider(
-                    "Terminální růst",
-                    0.0, 0.10, 0.03, 0.01,
-                    help="Dlouhodobý růst po projektovaném období",
-                )
-                dcf_wacc = st.slider(
-                    "WACC (diskont)",
-                    0.05, 0.20, 0.10, 0.01,
-                    help="Vážené průměrné náklady kapitálu",
-                )
-                dcf_years = st.slider(
-                    "Projektované roky",
-                    3, 10, 5, 1,
-                    help="Počet let pro projekci FCF",
-                )
+            # Uložení do session state
+            st.session_state["dcf_growth"] = dcf_growth
+            st.session_state["dcf_terminal"] = dcf_terminal
+            st.session_state["dcf_wacc"] = dcf_wacc
+            st.session_state["dcf_years"] = dcf_years
+            
+        st.markdown("---")
+        
+        # Nastavení AI
+        with st.expander("🤖 AI Nastavení", expanded=False):
+            use_ai = st.checkbox("Povolit AI analýzu", value=use_ai, disabled=not GEMINI_API_KEY)
+            st.session_state["use_ai"] = use_ai
+            if not GEMINI_API_KEY:
+                st.caption("⚠️ Chybí API klíč")
 
-                # persist
-                st.session_state["dcf_growth"] = dcf_growth
-                st.session_state["dcf_terminal"] = dcf_terminal
-                st.session_state["dcf_wacc"] = dcf_wacc
-                st.session_state["dcf_years"] = dcf_years
+        st.markdown("---")
+        
+        # Odkazy
+        st.markdown("### 🔗 Odkazy")
+        if ticker_input:
+            st.markdown(f"- [Yahoo Finance](https://finance.yahoo.com/quote/{ticker_input})")
+            st.markdown(f"- [Finviz](https://finviz.com/quote.ashx?t={ticker_input})")
 
-            st.markdown("---")
-
-            # AI Settings
-            with st.expander("🤖 AI Nastavení", expanded=False):
-                use_ai = st.checkbox(
-                    "Povolit AI analýzu",
-                    value=bool(GEMINI_API_KEY),
-                    help="Vyžaduje Gemini API klíč",
-                    disabled=not GEMINI_API_KEY,
-                )
-                st.session_state["use_ai"] = use_ai
-                if not GEMINI_API_KEY:
-                    st.warning("⚠️ Nastav GEMINI_API_KEY v kódu")
-
-            st.markdown("---")
-
-            # Quick links
-            st.markdown("### 🔗 Odkazy")
-            if ticker_input:
-                st.markdown(f"- [Yahoo Finance](https://finance.yahoo.com/quote/{ticker_input})")
-                st.markdown(
-                    f"- [SEC Filings](https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=&type=&dateb=&owner=exclude&count=40&search_text={ticker_input})"
-                )
-                st.markdown(f"- [Finviz](https://finviz.com/quote.ashx?t={ticker_input})")
-    
     # ========================================================================
-    # MAIN CONTENT
+    # MAIN CONTENT (Zbytek kódu pokračuje zde...)
     # ========================================================================
-    
     # Welcome screen if no analysis yet
     if not analyze_btn and "last_ticker" not in st.session_state:
         display_welcome_screen()
