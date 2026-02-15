@@ -24,7 +24,55 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 import streamlit as st
+import streamlit as st
+import streamlit.components.v1 as components
 
+# --- 1. FUNKCE PRO AUTOMATICKÉ SCHOVÁNÍ MENU ---
+def collapse_sidebar():
+    # Tento skript najde tlačítko pro zavření sidebar a simuluje kliknutí
+    components.html(
+        """
+        <script>
+        var btn = window.parent.document.querySelector('button[kind="headerNoPadding"]');
+        if (btn) { btn.click(); }
+        </script>
+        """,
+        height=0
+    )
+
+# --- 2. SPRÁVNÉ NAČTENÍ API KLÍČŮ (Oprava chyby "strip") ---
+try:
+    # Používáme indexaci ["NAZEV"], aby se klíč načetl jako text
+    GEMINI_API_KEY = st.secrets
+    FMP_API_KEY = st.secrets
+except Exception as e:
+    st.error("Chyba: API klíče nebyly nalezeny v App Settings > Secrets.")
+    GEMINI_API_KEY = ""
+    FMP_API_KEY = ""
+
+# --- 3. FIX PRŮHLEDNÉHO MENU NA MOBILU (CSS) ---
+st.markdown("""
+    <style>
+        {
+            background-color: #0e1117!important;
+            opacity: 1!important;
+        }
+        [data-testid="stHeader"] {
+            background-color: #0e1117!important;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
+# --- 4. INTEGRACE DO TLAČÍTKA ANALYZOVAT ---
+# Ve vaší části kódu se sidebarem to upravte takto:
+with st.sidebar:
+    ticker = st.text_input("Ticker Symbol", value="AAPL")
+    if st.button("Analyzovat"):
+        collapse_sidebar()  # <--- Toto schová menu hned po kliknutí
+        
+        # Zde pokračuje vaše původní logika analýzy...
+        st.write(f"Spouštím analýzu pro {ticker}...")
+        
 
 # --- Secrets / API keys (Streamlit Cloud: use Secrets) ---
 def _get_secret(name: str, default: str = "") -> str:
