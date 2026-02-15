@@ -42,96 +42,122 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Load external CSS for mobile fixes
-try:
-    import os
-    css_path = os.path.join(os.path.dirname(__file__), "mobile_fix.css")
-    if os.path.exists(css_path):
-        with open(css_path) as f:
-            st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
-except Exception as e:
-    logger.warning(f"Could not load mobile_fix.css: {e}")
-
-# Mobile-friendly CSS (inline backup)
+# Complete CSS - All styles inline (no external files needed)
 st.markdown("""
     <style>
-    /* CRITICAL: Fix transparent sidebar on mobile */
-    [data-testid="stSidebar"] {
-        background-color: rgb(14, 17, 23) !important;
+    /* =================================================================
+       CRITICAL FIX: Solid sidebar background (not transparent)
+       ================================================================= */
+    
+    /* Force solid background on ALL sidebar elements */
+    section[data-testid="stSidebar"] {
+        background-color: #262730 !important;
+        opacity: 1 !important;
         z-index: 999999 !important;
     }
     
-    /* Dark theme sidebar background */
-    [data-testid="stSidebar"] > div:first-child {
-        background-color: rgb(14, 17, 23) !important;
+    section[data-testid="stSidebar"] > div {
+        background-color: #262730 !important;
+        opacity: 1 !important;
     }
     
-    /* Light theme sidebar background */
+    section[data-testid="stSidebar"] > div > div {
+        background-color: #262730 !important;
+        opacity: 1 !important;
+    }
+    
+    /* Light theme support */
     @media (prefers-color-scheme: light) {
-        [data-testid="stSidebar"] {
-            background-color: rgb(255, 255, 255) !important;
-        }
-        [data-testid="stSidebar"] > div:first-child {
-            background-color: rgb(255, 255, 255) !important;
+        section[data-testid="stSidebar"],
+        section[data-testid="stSidebar"] > div,
+        section[data-testid="stSidebar"] > div > div {
+            background-color: #FFFFFF !important;
         }
     }
     
-    /* Sidebar overlay on mobile */
+    /* =================================================================
+       MOBILE OPTIMIZATIONS (screens < 768px)
+       ================================================================= */
     @media (max-width: 768px) {
-        /* Force sidebar to cover main content when open */
-        [data-testid="stSidebar"][aria-expanded="true"] {
+        /* Sidebar as modal overlay when open */
+        section[data-testid="stSidebar"][aria-expanded="true"] {
             position: fixed !important;
-            left: 0 !important;
             top: 0 !important;
+            left: 0 !important;
+            width: 85% !important;
+            max-width: 350px !important;
             height: 100vh !important;
-            width: 80% !important;
-            max-width: 300px !important;
-            background-color: rgb(14, 17, 23) !important;
+            background-color: #262730 !important;
             z-index: 999999 !important;
-            box-shadow: 2px 0 10px rgba(0, 0, 0, 0.5) !important;
+            box-shadow: 4px 0 20px rgba(0, 0, 0, 0.8) !important;
+            overflow-y: auto !important;
         }
         
-        /* Blur main content when sidebar is open */
-        [data-testid="stSidebar"][aria-expanded="true"] ~ * {
-            filter: blur(3px);
-            pointer-events: none;
+        /* Dim main content when sidebar is open */
+        section[data-testid="stSidebar"][aria-expanded="true"] ~ div {
+            opacity: 0.3 !important;
+            pointer-events: none !important;
         }
         
-        /* Form styling in sidebar */
-        [data-testid="stSidebar"] [data-testid="stForm"] {
-            background-color: rgba(255, 255, 255, 0.1) !important;
+        /* Form in sidebar - clearly visible */
+        section[data-testid="stSidebar"] [data-testid="stForm"] {
+            background-color: rgba(255, 255, 255, 0.08) !important;
+            border: 2px solid rgba(255, 255, 255, 0.2) !important;
+            border-radius: 12px !important;
             padding: 1.5rem !important;
-            border-radius: 0.75rem !important;
             margin: 1rem 0 !important;
-            border: 1px solid rgba(255, 255, 255, 0.2) !important;
         }
         
-        /* Make form inputs more visible */
-        [data-testid="stSidebar"] input {
-            background-color: rgba(255, 255, 255, 0.15) !important;
+        /* Input fields in sidebar */
+        section[data-testid="stSidebar"] input,
+        section[data-testid="stSidebar"] select,
+        section[data-testid="stSidebar"] textarea {
+            background-color: rgba(255, 255, 255, 0.12) !important;
             border: 1px solid rgba(255, 255, 255, 0.3) !important;
+            color: white !important;
         }
         
-        /* Reduce padding on mobile main content */
+        /* Submit button prominent */
+        section[data-testid="stSidebar"] button[kind="primary"] {
+            background-color: #FF4B4B !important;
+            color: white !important;
+            font-weight: 600 !important;
+            border: none !important;
+            box-shadow: 0 4px 12px rgba(255, 75, 75, 0.4) !important;
+        }
+        
+        /* Compact main content padding */
         .main .block-container {
-            padding-top: 2rem;
-            padding-bottom: 2rem;
-            padding-left: 1rem;
-            padding-right: 1rem;
+            padding-top: 1rem !important;
+            padding-bottom: 2rem !important;
+            padding-left: 0.75rem !important;
+            padding-right: 0.75rem !important;
+            max-width: 100% !important;
         }
         
-        /* Make metrics more compact */
+        /* Compact metrics */
         [data-testid="stMetricValue"] {
-            font-size: 1.5rem !important;
+            font-size: 1.8rem !important;
         }
         
-        /* Make tabs scrollable on mobile */
+        [data-testid="stMetricLabel"] {
+            font-size: 0.9rem !important;
+        }
+        
+        /* Scrollable tabs */
         [data-baseweb="tab-list"] {
-            overflow-x: auto;
-            flex-wrap: nowrap;
+            overflow-x: auto !important;
+            overflow-y: hidden !important;
+            flex-wrap: nowrap !important;
+            -webkit-overflow-scrolling: touch !important;
         }
         
-        /* Improve button sizes on mobile */
+        /* Touch-friendly buttons */
+        button {
+            min-height: 44px !important;
+            padding: 0.75rem 1.5rem !important;
+        }
+        
         .stButton button {
             width: 100%;
             font-size: 1rem;
@@ -139,7 +165,11 @@ st.markdown("""
         }
     }
     
-    /* Better decision card on all devices */
+    /* =================================================================
+       GENERAL UI IMPROVEMENTS
+       ================================================================= */
+    
+    /* Decision card styling */
     .decision-card {
         padding: 20px;
         border-radius: 16px;
@@ -147,10 +177,16 @@ st.markdown("""
         margin-bottom: 20px;
     }
     
-    /* Improve expander visibility */
+    /* Expander headers */
     .streamlit-expanderHeader {
         font-size: 1rem !important;
         font-weight: 600 !important;
+    }
+    
+    /* Better hover states */
+    button:hover {
+        transform: translateY(-1px);
+        transition: transform 0.2s;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -176,6 +212,68 @@ def get_data_provider() -> DataProvider:
     # V budoucnu: Fallback chain FMP → Intrinio → YFinance
     # Pro teď: jen YFinance
     return YFinanceProvider()
+
+
+# ============================================================================
+# WATCHLIST & MEMO FUNCTIONS
+# ============================================================================
+
+def get_watchlist() -> dict:
+    """Načte watchlist z JSON"""
+    import os
+    import json
+    data_dir = os.path.join(os.path.expanduser("~"), config.DATA_DIR)
+    watchlist_path = os.path.join(data_dir, "watchlist.json")
+    
+    if os.path.exists(watchlist_path):
+        try:
+            with open(watchlist_path, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    
+    return {"items": {}}
+
+
+def set_watchlist(data: dict):
+    """Uloží watchlist do JSON"""
+    import os
+    import json
+    data_dir = os.path.join(os.path.expanduser("~"), config.DATA_DIR)
+    os.makedirs(data_dir, exist_ok=True)
+    watchlist_path = os.path.join(data_dir, "watchlist.json")
+    
+    with open(watchlist_path, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def get_memos() -> dict:
+    """Načte memos z JSON"""
+    import os
+    import json
+    data_dir = os.path.join(os.path.expanduser("~"), config.DATA_DIR)
+    memos_path = os.path.join(data_dir, "memos.json")
+    
+    if os.path.exists(memos_path):
+        try:
+            with open(memos_path, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    
+    return {"memos": {}}
+
+
+def set_memos(data: dict):
+    """Uloží memos do JSON"""
+    import os
+    import json
+    data_dir = os.path.join(os.path.expanduser("~"), config.DATA_DIR)
+    os.makedirs(data_dir, exist_ok=True)
+    memos_path = os.path.join(data_dir, "memos.json")
+    
+    with open(memos_path, "w") as f:
+        json.dump(data, f, indent=2)
 
 
 def display_decision_card(signal):
@@ -300,26 +398,6 @@ def main():
     st.title(f"📊 {config.APP_NAME} {config.APP_VERSION}")
     st.markdown("**Profesionální analýza akcií s AI a pokročilými valuačními modely**")
     
-    # Mobile sidebar overlay dim effect
-    st.markdown("""
-        <script>
-        // Add dark overlay when sidebar is open on mobile
-        const checkSidebar = () => {
-            const sidebar = document.querySelector('[data-testid="stSidebar"]');
-            const main = document.querySelector('.main');
-            if (sidebar && main) {
-                const isOpen = sidebar.getAttribute('aria-expanded') === 'true';
-                if (window.innerWidth <= 768 && isOpen) {
-                    main.style.opacity = '0.3';
-                } else {
-                    main.style.opacity = '1';
-                }
-            }
-        };
-        setInterval(checkSidebar, 100);
-        </script>
-    """, unsafe_allow_html=True)
-    
     # Sidebar
     with st.sidebar:
         st.header("⚙️ Nastavení")
@@ -425,7 +503,8 @@ def main():
         "💰 Valuation",
         "📊 Quality Scores",
         "📈 Sentiment",
-        "📰 News & Fundamentals"
+        "📰 News & Fundamentals",
+        "📝 Memo & Watchlist"
     ])
     
     # --- TAB 1: DECISION DASHBOARD ---
@@ -649,6 +728,160 @@ def main():
                 st.metric("Current Ratio", format_number(metrics.current_ratio))
                 st.metric("Debt/Equity", format_number(metrics.debt_to_equity))
                 st.metric("FCF Yield", format_percent(metrics.fcf_yield))
+    
+    # --- TAB 6: MEMO & WATCHLIST ---
+    with tabs[5]:
+        st.header("📝 Investment Memo & Watchlist")
+        
+        # Load data
+        memos = get_memos()
+        watch = get_watchlist()
+        memo = memos.get("memos", {}).get(ticker, {})
+        wl = watch.get("items", {}).get(ticker, {})
+        
+        # Auto-draft snippets
+        auto_thesis = f"{company_info.name} — Firma v sektoru {company_info.sector}, {company_info.industry}. Hlavní investiční teze a konkurenční výhoda."
+        auto_drivers = "- Růst tržeb a earnings\n- Provozní marže a efficiency\n- Kapitálová alokace (buybacks/dividends)\n- Makro tailwinds a produktové cykly"
+        auto_risks = "- Vysoká valuace vyžaduje rychlý růst\n- Konkurenční tlaky\n- Regulační rizika\n- Cyklická poptávka"
+        
+        if dcf_result and dcf_result.fair_value_per_share:
+            auto_buy = f"- Buy zone: pod {format_money(dcf_result.fair_value_per_share * 0.85)} (MOS ~20%)\n- Watch: kolem {format_money(dcf_result.fair_value_per_share)}\n- Avoid: výrazně nad fair value bez zrychlení fundamentů"
+        else:
+            auto_buy = "- Buy zone: TBD\n- Watch: TBD\n- Avoid: TBD"
+        
+        # Memo Section
+        st.subheader("📄 Investment Memo")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            thesis = st.text_area(
+                "Investiční teze",
+                value=memo.get("thesis", auto_thesis),
+                height=100,
+                help="Proč by firma měla vyhrát?"
+            )
+            
+            drivers = st.text_area(
+                "Key Drivers",
+                value=memo.get("drivers", auto_drivers),
+                height=100,
+                help="Co musí platit, aby teze vyšla?"
+            )
+            
+            risks = st.text_area(
+                "Rizika",
+                value=memo.get("risks", auto_risks),
+                height=100,
+                help="Co může pokazit investici?"
+            )
+        
+        with col2:
+            catalysts = st.text_area(
+                "Catalysts",
+                value=memo.get("catalysts", ""),
+                height=100,
+                help="Co může pohnout cenou nahoru?"
+            )
+            
+            buy_conditions = st.text_area(
+                "Buy Podmínky",
+                value=memo.get("buy_conditions", auto_buy),
+                height=100,
+                help="Za jakých podmínek koupit?"
+            )
+            
+            notes = st.text_area(
+                "Poznámky",
+                value=memo.get("notes", ""),
+                height=100,
+                help="Další poznámky"
+            )
+        
+        # Save button
+        if st.button("💾 Uložit Memo", use_container_width=True, type="primary"):
+            if "memos" not in memos:
+                memos["memos"] = {}
+            
+            memos["memos"][ticker] = {
+                "thesis": thesis,
+                "drivers": drivers,
+                "risks": risks,
+                "catalysts": catalysts,
+                "buy_conditions": buy_conditions,
+                "notes": notes,
+                "updated_at": datetime.now().isoformat(),
+            }
+            set_memos(memos)
+            st.success("✅ Memo uloženo!")
+        
+        st.markdown("---")
+        
+        # Watchlist Section
+        st.subheader("⭐ Watchlist")
+        
+        col1, col2, col3 = st.columns([2, 1, 1])
+        with col1:
+            target_buy = st.number_input(
+                "Cílová nákupní cena",
+                value=float(wl.get("target_buy", 0.0)) if wl else 0.0,
+                step=10.0,
+                help="Cena, za kterou chceš koupit"
+            )
+        
+        with col2:
+            if st.button("⭐ Přidat do watchlistu", use_container_width=True):
+                if "items" not in watch:
+                    watch["items"] = {}
+                
+                watch["items"][ticker] = {
+                    "target_buy": target_buy,
+                    "added_at": wl.get("added_at") or datetime.now().isoformat(),
+                    "updated_at": datetime.now().isoformat(),
+                }
+                set_watchlist(watch)
+                st.success("✅ Přidáno!")
+                st.rerun()
+        
+        with col3:
+            if st.button("🗑️ Odebrat", use_container_width=True):
+                if ticker in watch.get("items", {}):
+                    watch["items"].pop(ticker, None)
+                    set_watchlist(watch)
+                    st.success("✅ Odebráno!")
+                    st.rerun()
+        
+        # Display watchlist
+        st.markdown("### Moje Watchlist")
+        items = watch.get("items", {})
+        
+        if not items:
+            st.info("💡 Watchlist je prázdný. Přidej první ticker!")
+        else:
+            import pandas as pd
+            rows = []
+            
+            for tkr, item in items.items():
+                try:
+                    provider = get_data_provider()
+                    price_data_wl = provider.get_price_data(tkr)
+                    price_now = price_data_wl.current_price if price_data_wl else None
+                except Exception:
+                    price_now = None
+                
+                tgt = item.get("target_buy")
+                hit = (price_now is not None and tgt is not None and tgt > 0 and price_now <= tgt)
+                
+                rows.append({
+                    "Ticker": tkr,
+                    "Current Price": format_money(price_now) if price_now else "—",
+                    "Target Buy": format_money(tgt) if tgt else "—",
+                    "Alert": "🔔 BUY NOW!" if hit else "⏳ Wait",
+                    "Updated": item.get("updated_at", "")[:10],  # Just date
+                })
+            
+            df_watchlist = pd.DataFrame(rows)
+            st.dataframe(df_watchlist, use_container_width=True, hide_index=True)
+            st.caption("🔔 = Cena dosáhla nebo je pod target buy price!")
     
     # Footer
     st.markdown("---")
