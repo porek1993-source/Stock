@@ -24,55 +24,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 import streamlit as st
-import streamlit as st
-import streamlit.components.v1 as components
 
-# --- 1. FUNKCE PRO AUTOMATICKÉ SCHOVÁNÍ MENU ---
-def collapse_sidebar():
-    # Tento skript najde tlačítko pro zavření sidebar a simuluje kliknutí
-    components.html(
-        """
-        <script>
-        var btn = window.parent.document.querySelector('button[kind="headerNoPadding"]');
-        if (btn) { btn.click(); }
-        </script>
-        """,
-        height=0
-    )
-
-# --- 2. SPRÁVNÉ NAČTENÍ API KLÍČŮ (Oprava chyby "strip") ---
-try:
-    # Používáme indexaci ["NAZEV"], aby se klíč načetl jako text
-    GEMINI_API_KEY = st.secrets
-    FMP_API_KEY = st.secrets
-except Exception as e:
-    st.error("Chyba: API klíče nebyly nalezeny v App Settings > Secrets.")
-    GEMINI_API_KEY = ""
-    FMP_API_KEY = ""
-
-# --- 3. FIX PRŮHLEDNÉHO MENU NA MOBILU (CSS) ---
-st.markdown("""
-    <style>
-        {
-            background-color: #0e1117!important;
-            opacity: 1!important;
-        }
-        [data-testid="stHeader"] {
-            background-color: #0e1117!important;
-        }
-    </style>
-""", unsafe_allow_html=True)
-
-# --- 4. INTEGRACE DO TLAČÍTKA ANALYZOVAT ---
-# Ve vaší části kódu se sidebarem to upravte takto:
-with st.sidebar:
-    ticker = st.text_input("Ticker Symbol", value="AAPL")
-    if st.button("Analyzovat"):
-        collapse_sidebar()  # <--- Toto schová menu hned po kliknutí
-        
-        # Zde pokračuje vaše původní logika analýzy...
-        st.write(f"Spouštím analýzu pro {ticker}...")
-        
 
 # --- Secrets / API keys (Streamlit Cloud: use Secrets) ---
 def _get_secret(name: str, default: str = "") -> str:
@@ -1037,6 +989,16 @@ def main():
         layout="wide",
         initial_sidebar_state="expanded"
     )
+
+    # Sidebar UX (mobile-friendly): allow hiding the sidebar after pressing "Analyzovat".
+    if "sidebar_visible" not in st.session_state:
+        st.session_state["sidebar_visible"] = True
+
+    def _hide_sidebar() -> None:
+        st.session_state["sidebar_visible"] = False
+
+    def _show_sidebar() -> None:
+        st.session_state["sidebar_visible"] = True
     
     # Custom CSS
     st.markdown("""
@@ -1128,72 +1090,112 @@ def main():
 }
 </style>
     """, unsafe_allow_html=True)
+
+    # When hidden, fully remove sidebar overlay (helps on mobile so content isn't blocked).
+    if not st.session_state.get("sidebar_visible", True):
+        st.markdown(
+            """
+            <style>
+              [data-testid="stSidebar"], section[data-testid="stSidebar"] { display: none !important; }
+              [data-testid="collapsedControl"] { display: none !important; }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
     
     # ========================================================================
     # SIDEBAR - Settings & Controls
     # ========================================================================
-    
-    with st.sidebar:
-        st.title("📈 Stock Picker Pro")
-        st.caption("v2.0 - Advanced Quant Analysis")
-        st.markdown("---")
-        
-        # Ticker input
-        ticker_input = st.text_input(
-            "Ticker Symbol",
-            value="AAPL",
-            help="Zadej ticker (např. AAPL, MSFT, GOOGL)",
-            max_chars=10
-        ).upper().strip()
-        
-        analyze_btn = st.button("🔍 Analyzovat", type="primary", use_container_width=True)
-        
-        st.markdown("---")
-        
-        # DCF Settings
-        with st.expander("⚙️ DCF Parametry", expanded=False):
-            dcf_growth = st.slider(
-                "Růst FCF (roční)",
-                0.0, 0.50, 0.10, 0.01,
-                help="Očekávaný roční růst Free Cash Flow"
+
+    # If the sidebar is hidden (after analyze), show a compact button to bring it back.
+    if not st.session_state.get("sidebar_visible", True):
+        st.button("☰ Menu", key="open_menu_btn", on_click=_show_sidebar)
+
+    # Defaults (so the app keeps working even when sidebar is hidden)
+    ticker_input = st.session_state.get("ticker_selected", "AAPL")
+    analyze_btn = False
+    dcf_growth = st.session_state.get("dcf_growth", 0.10)
+    dcf_terminal = st.session_state.get("dcf_terminal", 0.03)
+    dcf_wacc = st.session_state.get("dcf_wacc", 0.10)
+    dcf_years = st.session_state.get("dcf_years", 5)
+    use_ai = st.session_state.get("use_ai", bool(GEMINI_API_KEY))
+
+    if st.session_state.get("sidebar_visible", True):
+        with st.sidebar:
+            st.title("📈 Stock Picker Pro")
+            st.caption("v2.0 - Advanced Quant Analysis")
+            st.markdown("---")
+
+            # Ticker input
+            ticker_input = st.text_input(
+                "Ticker Symbol",
+                value="AAPL",
+                help="Zadej ticker (např. AAPL, MSFT, GOOGL)",
+                max_chars=10,
+            ).upper().strip()
+
+            analyze_btn = st.button(
+                "🔍 Analyzovat",
+                type="primary",
+                use_container_width=True,
+                key="analyze_btn",
             )
-            dcf_terminal = st.slider(
-                "Terminální růst",
-                0.0, 0.10, 0.03, 0.01,
-                help="Dlouhodobý růst po projektovaném období"
-            )
-            dcf_wacc = st.slider(
-                "WACC (diskont)",
-                0.05, 0.20, 0.10, 0.01,
-                help="Vážené průměrné náklady kapitálu"
-            )
-            dcf_years = st.slider(
-                "Projektované roky",
-                3, 10, 5, 1,
-                help="Počet let pro projekci FCF"
-            )
-        
-        st.markdown("---")
-        
-        # AI Settings
-        with st.expander("🤖 AI Nastavení", expanded=False):
-            use_ai = st.checkbox(
-                "Povolit AI analýzu",
-                value=bool(GEMINI_API_KEY),
-                help="Vyžaduje Gemini API klíč",
-                disabled=not GEMINI_API_KEY
-            )
-            if not GEMINI_API_KEY:
-                st.warning("⚠️ Nastav GEMINI_API_KEY v kódu")
-        
-        st.markdown("---")
-        
-        # Quick links
-        st.markdown("### 🔗 Odkazy")
-        if ticker_input:
-            st.markdown(f"- [Yahoo Finance](https://finance.yahoo.com/quote/{ticker_input})")
-            st.markdown(f"- [SEC Filings](https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=&type=&dateb=&owner=exclude&count=40&search_text={ticker_input})")
-            st.markdown(f"- [Finviz](https://finviz.com/quote.ashx?t={ticker_input})")
+
+            st.markdown("---")
+
+            # DCF Settings
+            with st.expander("⚙️ DCF Parametry", expanded=False):
+                dcf_growth = st.slider(
+                    "Růst FCF (roční)",
+                    0.0, 0.50, 0.10, 0.01,
+                    help="Očekávaný roční růst Free Cash Flow",
+                )
+                dcf_terminal = st.slider(
+                    "Terminální růst",
+                    0.0, 0.10, 0.03, 0.01,
+                    help="Dlouhodobý růst po projektovaném období",
+                )
+                dcf_wacc = st.slider(
+                    "WACC (diskont)",
+                    0.05, 0.20, 0.10, 0.01,
+                    help="Vážené průměrné náklady kapitálu",
+                )
+                dcf_years = st.slider(
+                    "Projektované roky",
+                    3, 10, 5, 1,
+                    help="Počet let pro projekci FCF",
+                )
+
+                # persist
+                st.session_state["dcf_growth"] = dcf_growth
+                st.session_state["dcf_terminal"] = dcf_terminal
+                st.session_state["dcf_wacc"] = dcf_wacc
+                st.session_state["dcf_years"] = dcf_years
+
+            st.markdown("---")
+
+            # AI Settings
+            with st.expander("🤖 AI Nastavení", expanded=False):
+                use_ai = st.checkbox(
+                    "Povolit AI analýzu",
+                    value=bool(GEMINI_API_KEY),
+                    help="Vyžaduje Gemini API klíč",
+                    disabled=not GEMINI_API_KEY,
+                )
+                st.session_state["use_ai"] = use_ai
+                if not GEMINI_API_KEY:
+                    st.warning("⚠️ Nastav GEMINI_API_KEY v kódu")
+
+            st.markdown("---")
+
+            # Quick links
+            st.markdown("### 🔗 Odkazy")
+            if ticker_input:
+                st.markdown(f"- [Yahoo Finance](https://finance.yahoo.com/quote/{ticker_input})")
+                st.markdown(
+                    f"- [SEC Filings](https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=&type=&dateb=&owner=exclude&count=40&search_text={ticker_input})"
+                )
+                st.markdown(f"- [Finviz](https://finviz.com/quote.ashx?t={ticker_input})")
     
     # ========================================================================
     # MAIN CONTENT
@@ -1207,6 +1209,10 @@ def main():
     # Process ticker
     ticker = ticker_input if analyze_btn else st.session_state.get("last_ticker", "AAPL")
     st.session_state["last_ticker"] = ticker
+
+    # Auto-hide sidebar after analysis submission (useful on mobile)
+    if analyze_btn:
+        _hide_sidebar()
     
     # Fetch data
     with st.spinner(f"📊 Načítám data pro {ticker}..."):
