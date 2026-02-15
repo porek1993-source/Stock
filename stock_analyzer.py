@@ -49,7 +49,7 @@ st.markdown(
 def js_close_sidebar():
     return """
     <script>
-        // Robust close/hide for Streamlit sidebar (mobile drawer + desktop)
+        // Robust close for Streamlit sidebar (mobile drawer + desktop)
         (function () {
             function getDoc() {
                 return (window.parent && window.parent.document) ? window.parent.document : document;
@@ -57,13 +57,12 @@ def js_close_sidebar():
             function tryClose() {
                 const doc = getDoc();
 
-                // 1) Preferred buttons
+                // 1) Preferred buttons (mobile + desktop)
                 const selectors = [
                     'button[aria-label="Close sidebar"]',
                     'button[title="Close sidebar"]',
                     '[data-testid="stSidebarCollapseButton"]',
-                    '[data-testid="stSidebarToggleButton"]',
-                    'button[aria-label="Open sidebar"]'
+                    '[data-testid="stSidebarToggleButton"]'
                 ];
 
                 let btn = null;
@@ -72,7 +71,7 @@ def js_close_sidebar():
                     if (el) { btn = el; break; }
                 }
 
-                // 2) Fallback: first button inside the sidebar
+                // 2) Fallback: first button inside the sidebar header area
                 if (!btn) {
                     const sidebar = doc.querySelector('section[data-testid="stSidebar"], [data-testid="stSidebar"]');
                     if (sidebar) {
@@ -85,22 +84,26 @@ def js_close_sidebar():
                     try { btn.click(); } catch (e) {}
                 }
 
-                // 4) Hard-hide fallback (works even if no button is found)
+                // 4) Last-resort: temporarily hide sidebar element so it doesn't cover content,
+                // but restore it shortly after so the user can open it again (prevents "invisible sidebar" bug).
                 const sidebarEl = doc.querySelector('section[data-testid="stSidebar"], [data-testid="stSidebar"]');
                 if (sidebarEl) {
+                    const prevDisplay = sidebarEl.style.display;
                     sidebarEl.style.display = 'none';
+                    setTimeout(function() {
+                        // Restore previous display (or default) so sidebar can be opened manually later
+                        sidebarEl.style.display = prevDisplay || '';
+                    }, 900);
                 }
             }
 
-            // Let Streamlit render first, then close/hide. Try a few times.
+            // Let Streamlit render first, then close. Try a few times.
             setTimeout(function () { tryClose(); }, 150);
             setTimeout(function () { tryClose(); }, 350);
             setTimeout(function () { tryClose(); }, 700);
         })();
     </script>
     """
-
-
 def _get_secret(name: str, default: str = "") -> str:
     try:
         # Streamlit Cloud secrets
