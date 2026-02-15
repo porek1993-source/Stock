@@ -1464,7 +1464,7 @@ def main():
             st.session_state.sidebar_state = "collapsed"
             st.session_state.close_sidebar_now = True
             os.environ["STOCK_PICKER_SIDEBAR_STATE"] = "collapsed"
-analyze_btn = st.button(
+        analyze_btn = st.button(
             "🔍 Analyzovat",
             type="primary",
             use_container_width=True,
