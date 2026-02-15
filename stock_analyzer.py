@@ -27,69 +27,75 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 
+# Page config must be the first Streamlit command
+st.set_page_config(
+    page_title="Stock Picker Pro",
+    page_icon="📈",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# Use full width on desktop (avoid centered/narrow container)
+st.markdown(
+    """
+    <style>
+      .block-container { max-width: 100% !important; padding-left: 1.2rem; padding-right: 1.2rem; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
 def js_close_sidebar():
     return """
     <script>
-        // Robust close for mobile + desktop Streamlit sidebar
-        (function() {
-            function findCloseButton(doc) {
+        // Robust close/hide for Streamlit sidebar (mobile drawer + desktop)
+        (function () {
+            function getDoc() {
+                return (window.parent && window.parent.document) ? window.parent.document : document;
+            }
+            function tryClose() {
+                const doc = getDoc();
+
+                // 1) Preferred buttons
                 const selectors = [
                     'button[aria-label="Close sidebar"]',
+                    'button[title="Close sidebar"]',
                     '[data-testid="stSidebarCollapseButton"]',
                     '[data-testid="stSidebarToggleButton"]',
-                    'button[title="Close sidebar"]',
-                    'button[aria-label="Open sidebar"]' // toggle-style button (may close if open)
+                    'button[aria-label="Open sidebar"]'
                 ];
+
+                let btn = null;
                 for (const sel of selectors) {
                     const el = doc.querySelector(sel);
-                    if (el) return el;
+                    if (el) { btn = el; break; }
                 }
 
-                // Fallback: first button in sidebar header/section
-                const sidebar = doc.querySelector('section[data-testid="stSidebar"], [data-testid="stSidebar"]');
-                if (sidebar) {
-                    const btn = sidebar.querySelector('button');
-                    if (btn) return btn;
-                }
-
-                // Fallback: first header button
-                const header = doc.querySelector('header');
-                if (header) {
-                    const btn = header.querySelector('button');
-                    if (btn) return btn;
-                }
-
-                return null;
-            }
-
-            function tryClose() {
-                try {
-                    const doc = window.parent.document;
-                    const btn = findCloseButton(doc);
-                    if (btn) {
-                        btn.click();
-                        // some mobiles need double-tap
-                        setTimeout(() => { try { btn.click(); } catch(e) {} }, 120);
-                        return true;
+                // 2) Fallback: first button inside the sidebar
+                if (!btn) {
+                    const sidebar = doc.querySelector('section[data-testid="stSidebar"], [data-testid="stSidebar"]');
+                    if (sidebar) {
+                        btn = sidebar.querySelector('button');
                     }
-                } catch (e) {
-                    console.error("Error closing sidebar:", e);
                 }
-                return false;
+
+                // 3) Click if found
+                if (btn) {
+                    try { btn.click(); } catch (e) {}
+                }
+
+                // 4) Hard-hide fallback (works even if no button is found)
+                const sidebarEl = doc.querySelector('section[data-testid="stSidebar"], [data-testid="stSidebar"]');
+                if (sidebarEl) {
+                    sidebarEl.style.display = 'none';
+                }
             }
 
-            // Give Streamlit time to render after click + rerun
-            let attempts = 0;
-            const maxAttempts = 14;
-            const interval = setInterval(() => {
-                attempts++;
-                if (tryClose() || attempts >= maxAttempts) {
-                    clearInterval(interval);
-                }
-            }, 120);
-
-            // initial delay
-            setTimeout(() => { tryClose(); }, 300);
+            // Let Streamlit render first, then close/hide. Try a few times.
+            setTimeout(function () { tryClose(); }, 150);
+            setTimeout(function () { tryClose(); }, 350);
+            setTimeout(function () { tryClose(); }, 700);
         })();
     </script>
     """
@@ -1292,13 +1298,23 @@ TEXT:
 # Smart parameter estimation (Quality Premium)
 # -----------------------------------------------------------------------------
 def estimate_smart_params(info: Dict[str, Any], metrics: Dict[str, "Metric"]) -> Dict[str, Any]:
-    """Estimate 'Smart DCF' parameters using sector, size and simple quality signals.
+    """
+    Smart DCF parameter estimation tuned for both mega-caps and smaller firms.
 
-    Universal logic for mega-caps and smaller firms:
-      - Weighted growth (70% revenue, 30% earnings) with graceful fallbacks.
-      - Size-aware growth caps (mega-caps capped lower than smaller firms).
-      - Realistic exit multiples by (quality × sector).
-      - WACC = 4.2% + beta*5% with size premium / floors.
+    Changes requested:
+      1) Weighted growth: raw_growth = 0.7*revenue_growth + 0.3*earnings_growth (fallbacks if missing)
+      2) Dynamic growth cap:
+           - marketCap > 200B  -> cap 14%
+           - marketCap <= 200B -> cap 20%
+      3) Exit multiple (realistic):
+           - High Quality Tech/Comm -> 23x
+           - Standard Tech/Comm     -> 20x
+           - Others                 -> 15x
+      4) WACC with size premium:
+           - Base: 4.2% + beta*5%
+           - Mega caps (>200B): floor 9%
+           - Small caps (<10B): +1.5% and floor 10%
+           - Otherwise: floor 8%
     """
     def metric_value(key: str) -> Optional[float]:
         m = metrics.get(key)
@@ -1306,100 +1322,83 @@ def estimate_smart_params(info: Dict[str, Any], metrics: Dict[str, "Metric"]) ->
             return None
         return safe_float(getattr(m, "value", None))
 
+    dbg: List[str] = []
+
     market_cap = safe_float(info.get("marketCap")) or 0.0
     sector = str(info.get("sector") or "").strip()
 
-    # --- Quality detection
+    is_mega_cap = market_cap > 200e9
+    is_small_cap = market_cap > 0 and market_cap < 10e9
+
+    # --- Quality detection (Quality Premium)
     profit_margin = metric_value("profit_margin")
     roe = metric_value("roe")
     high_quality = bool(
         (profit_margin is not None and profit_margin > 0.20) and
         (roe is not None and roe > 0.20)
     )
+    if high_quality:
+        dbg.append("Quality: High (profit_margin>20% & ROE>20%)")
 
-    # --- Growth (weighted): 70% revenue, 30% earnings (with fallbacks)
+    # --- Growth (weighted)
     rev_g = metric_value("revenue_growth")
     earn_g = metric_value("earnings_growth")
 
-    if rev_g is not None and earn_g is not None:
-        raw_growth = (0.7 * rev_g) + (0.3 * earn_g)
-        growth_method = "weighted(0.7*revenue + 0.3*earnings)"
-    elif rev_g is not None:
-        raw_growth = rev_g
-        growth_method = "revenue_growth_only"
-    elif earn_g is not None:
-        raw_growth = earn_g
-        growth_method = "earnings_growth_only"
-    else:
+    if rev_g is None and earn_g is None:
         raw_growth = 0.10
-        growth_method = "default_10pct"
-
-    # --- Dynamic growth cap by size
-    if market_cap > 200e9:
-        growth_cap = 0.14
-        is_mega_cap = True
+        dbg.append("Growth: missing rev/earn -> default 10%")
+    elif rev_g is None:
+        raw_growth = float(earn_g)
+        dbg.append("Growth: using earnings_growth only")
+    elif earn_g is None:
+        raw_growth = float(rev_g)
+        dbg.append("Growth: using revenue_growth only")
     else:
-        growth_cap = 0.20
-        is_mega_cap = False
+        raw_growth = (0.7 * float(rev_g)) + (0.3 * float(earn_g))
+        dbg.append("Growth: weighted 70% revenue + 30% earnings")
 
-    # Clamp growth to a sensible band
-    growth = max(0.02, min(growth_cap, raw_growth))
+    # clamp raw growth to a sane range before cap
+    raw_growth = float(max(0.02, min(0.35, raw_growth)))
 
-    # --- Exit multiple (realistic)
-    tech_like = sector.lower() in {"technology", "communication services", "communication"}
-    if tech_like and high_quality:
-        exit_multiple = 23.0
-        multiple_bucket = "high_quality_tech"
-    elif tech_like:
-        exit_multiple = 20.0
-        multiple_bucket = "standard_tech"
+    # --- Dynamic growth cap
+    growth_cap = 0.14 if is_mega_cap else 0.20
+    growth = float(min(raw_growth, growth_cap))
+    dbg.append(f"Growth cap: {growth_cap*100:.1f}% ({'mega' if is_mega_cap else 'non-mega'})")
+
+    # --- Exit multiple (realistic by quality × sector bucket)
+    sector_l = sector.lower()
+    is_tech_comm = ("technology" in sector_l) or ("communication" in sector_l)
+    if is_tech_comm:
+        exit_multiple = 23.0 if high_quality else 20.0
+        dbg.append(f"Exit multiple: {'HQ' if high_quality else 'Std'} Tech/Comm -> {exit_multiple:.1f}x")
     else:
         exit_multiple = 15.0
-        multiple_bucket = "other"
+        dbg.append(f"Exit multiple: Other -> {exit_multiple:.1f}x")
 
-    # --- WACC with size premium / floors
+    # --- WACC (base + size premium)
     beta = safe_float(info.get("beta"))
     if beta is None or beta <= 0:
-        wacc = 0.10
-        wacc_method = "default_10pct_no_beta"
+        base_wacc = 0.10
+        dbg.append("WACC: beta missing/invalid -> default 10%")
     else:
-        wacc = 0.042 + (beta * 0.05)
-        wacc_method = "rf(4.2%) + beta*5%"
+        base_wacc = 0.042 + float(beta) * 0.05
+        dbg.append(f"WACC: base = 4.2% + beta*5% (beta={beta:.2f})")
 
-    # Small-cap premium (<$10B)
-    if 0 < market_cap < 10e9:
-        wacc += 0.015
+    if is_small_cap:
+        base_wacc += 0.015
         wacc_floor = 0.10
-        size_bucket = "small_cap_<10B"
-    # Mega-cap floor (>$200B)
-    elif market_cap > 200e9:
+        dbg.append("WACC: small-cap premium +1.5%, floor 10%")
+    elif is_mega_cap:
         wacc_floor = 0.09
-        size_bucket = "mega_cap_>200B"
+        dbg.append("WACC: mega-cap floor 9%")
     else:
         wacc_floor = 0.08
-        size_bucket = "mid_cap"
+        dbg.append("WACC: default floor 8%")
 
-    # Apply floor + reasonable upper clamp
-    wacc = max(wacc_floor, min(0.18, wacc))
+    wacc = float(max(wacc_floor, min(0.18, base_wacc)))
 
-    return {
-        "wacc": wacc,
-        "growth": growth,
-        "exit_multiple": exit_multiple,
-        "is_mega_cap": is_mega_cap,
-        "high_quality": high_quality,
-        "market_cap": market_cap,
-        "sector": sector,
-        "dbg": {
-            "growth_method": growth_method,
-            "growth_cap": growth_cap,
-            "raw_growth": raw_growth,
-            "multiple_bucket": multiple_bucket,
-            "wacc_method": wacc_method,
-            "wacc_floor": wacc_floor,
-            "size_bucket": size_bucket,
-        },
-    }
+    return {"wacc": wacc, "growth": growth, "exit_multiple": exit_multiple, "dbg": dbg}
+
 
 def main():
     """Main application entry point."""
@@ -1657,15 +1656,30 @@ def main():
             used_exit_multiple = float(smart["exit_multiple"])
             used_mode_label = "Smart"
 
+        
+        # --- Amazon-style reinvestment heavy adjustment (Adjusted FCF) ---
+        # If FCF is unusually low relative to Operating Cash Flow, treat it as heavy reinvestment and
+        # use an adjusted cash-flow proxy for DCF (maintenance earnings proxy).
+        dcf_fcf_used = fcf
+        try:
+            operating_cashflow = safe_float(info.get("operatingCashflow"))
+        except Exception:
+            operating_cashflow = None
+
+        if operating_cashflow and dcf_fcf_used and dcf_fcf_used > 0 and operating_cashflow > 0:
+            if dcf_fcf_used < (0.3 * operating_cashflow):
+                dcf_fcf_used = operating_cashflow * 0.6
+                st.warning("⚠️ Detekováno vysoké reinvestování (Amazon style). Použito upravené OCF místo FCF.")
+                print(f"Adjusted FCF used (reinvestment-heavy): {dcf_fcf_used/1e9:.2f}B (OCF {operating_cashflow/1e9:.2f}B)")
         fair_value_dcf = None
         mos_dcf = None
         implied_growth = None
         
-        if fcf and shares and fcf > 0:
+        if dcf_fcf_used and shares and dcf_fcf_used > 0:
             # --- NOVÝ VÝPOČET DCF (Exit Multiple Metoda) ---
             # 1. Spočítáme budoucí FCF pro každý rok
             future_fcf = []
-            current_fcf = fcf
+            current_fcf = dcf_fcf_used
             
             # Diskontní faktor
             discount_factors = [(1 + used_dcf_wacc) ** i for i in range(1, dcf_years + 1)]
