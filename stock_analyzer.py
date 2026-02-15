@@ -1,29 +1,4 @@
 """
-Stock Picker Pro v2.0
-======================
-Pokročilá kvantitativní analýza akcií s AI asistencí, makro kalendářem a peer analýzou.
-
-Author: Enhanced by Claude
-Version: 2.0
-"""
-
-import os
-import warnings
-warnings.filterwarnings('ignore', category=DeprecationWarning)
-warnings.filterwarnings('ignore', category=FutureWarning, module=r'google\.generativeai\..*')
-
-import re
-import json
-import math
-import time
-import datetime as dt
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
-
-import numpy as np
-import pandas as pd
-import yfinance as yf
-import streamlit as st
 
 
 # --- Secrets / API keys (Streamlit Cloud: use Secrets) ---
