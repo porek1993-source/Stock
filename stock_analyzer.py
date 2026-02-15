@@ -25,8 +25,6 @@ import pandas as pd
 import yfinance as yf
 import streamlit as st
 
-import streamlit as st
-
 
 # --- Secrets / API keys (Streamlit Cloud: use Secrets) ---
 def _get_secret(name: str, default: str = "") -> str:
@@ -56,7 +54,7 @@ except Exception:
 APP_NAME = "Stock Picker Pro"
 APP_VERSION = "v2.0"
 
-GEMINI_MODEL = "gemini-2.5-flash-lite"
+GEMINI_MODEL = "gemini-2.0-flash-exp"
 
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), ".stock_picker_pro")
@@ -447,6 +445,44 @@ def calculate_dcf_fair_value(
         return None
 
 
+
+
+def calculate_dcf_intrinsic_value_multiple(
+    fcf: float,
+    shares_outstanding: float,
+    growth_rate: float = 0.06,
+    discount_rate: float = 0.10,
+    years: int = 5,
+    terminal_multiple: float = 18.0,
+) -> float | None:
+    """Intrinsic value per share via a simple DCF with a terminal FCF multiple (15–20x typical)."""
+    try:
+        if fcf is None or shares_outstanding in (None, 0) or years <= 0:
+            return None
+        if discount_rate <= -0.99:
+            return None
+
+        pv = 0.0
+        fcf_t = float(fcf)
+        for t in range(1, int(years) + 1):
+            fcf_t *= (1.0 + float(growth_rate))
+            pv += fcf_t / ((1.0 + float(discount_rate)) ** t)
+
+        terminal_value = float(terminal_multiple) * fcf_t
+        pv += terminal_value / ((1.0 + float(discount_rate)) ** years)
+
+        return pv / float(shares_outstanding)
+    except Exception:
+        return None
+
+
+def compute_buy_price_levels(fair_value: float | None) -> dict:
+    """Practical buy thresholds derived from a fair value."""
+    if not fair_value:
+        return {"buy": None, "strong_buy": None, "must_buy": None}
+    fv = float(fair_value)
+    return {"buy": fv * 0.95, "strong_buy": fv * 0.80, "must_buy": fv * 0.70}
+
 def reverse_dcf_implied_growth(
     current_price: float,
     fcf: float,
@@ -694,7 +730,8 @@ def generate_ai_analyst_report(
     current_price: Optional[float],
     scorecard: float,
     insider_signal: Dict[str, Any],
-    macro_events: List[Dict[str, Any]]
+    macro_events: List[Dict[str, Any]],
+    suggested_buy_price: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Generate comprehensive AI analyst report using Gemini.
@@ -722,6 +759,14 @@ def generate_ai_analyst_report(
             "confidence": "N/A"
         }
     
+    # Deterministic fallback "wait/buy" price: require at least 5% MOS vs DCF.
+    if suggested_buy_price is None:
+        try:
+            if dcf_fair_value is not None and float(dcf_fair_value) > 0:
+                suggested_buy_price = float(dcf_fair_value) * 0.95
+        except Exception:
+            suggested_buy_price = None
+
     # Prepare context
     context = f"""
 Analyzuj akci {company} ({ticker}) a poskytni hloubkový investiční report.
@@ -729,6 +774,7 @@ Analyzuj akci {company} ({ticker}) a poskytni hloubkový investiční report.
 AKTUÁLNÍ DATA:
 - Cena: {fmt_money(current_price)}
 - Férovka (DCF): {fmt_money(dcf_fair_value)}
+- Doporučená nákupní cena (MOS ≥ 5% vs DCF): {fmt_money(suggested_buy_price)}
 - Scorecard: {scorecard:.1f}/100
 - P/E: {fmt_num(metrics.get('pe').value if metrics.get('pe') else None)}
 - Revenue Growth: {fmt_pct(metrics.get('revenue_growth').value if metrics.get('revenue_growth') else None)}
@@ -778,6 +824,10 @@ Vrať POUZE validní JSON s těmito klíči (žádný další text):
         result_text = result_text.strip()
         
         result = json.loads(result_text)
+
+        # If the model omits wait_for_price, fall back to deterministic suggested_buy_price.
+        if result.get("wait_for_price") in (None, "", "N/A") and suggested_buy_price is not None:
+            result["wait_for_price"] = suggested_buy_price
         return result
     
     except Exception as e:
@@ -786,7 +836,7 @@ Vrať POUZE validní JSON s těmito klíči (žádný další text):
             "bull_case": ["Chyba při generování"],
             "bear_case": [],
             "verdict": "ERROR",
-            "wait_for_price": None,
+            "wait_for_price": suggested_buy_price,
             "reasoning": "Technická chyba",
             "confidence": "N/A"
         }
@@ -1141,6 +1191,7 @@ def main():
                 type="primary",
                 use_container_width=True,
                 key="analyze_btn",
+                on_click=_hide_sidebar,
             )
 
             st.markdown("---")
@@ -1247,6 +1298,26 @@ def main():
             fair_value_dcf = calculate_dcf_fair_value(
                 fcf, dcf_growth, dcf_terminal, dcf_wacc, dcf_years, shares
             )
+            fair_value_dcf_multiple = calculate_dcf_intrinsic_value_multiple(
+                fcf=fcf,
+                shares_outstanding=shares_outstanding,
+                growth_rate=fcf_growth,
+                discount_rate=discount_rate,
+                years=5,
+                terminal_multiple=terminal_multiple,
+            )
+
+            intrinsic_value = None
+            if fair_value_dcf and fair_value_dcf_multiple:
+                intrinsic_value = min(float(fair_value_dcf), float(fair_value_dcf_multiple))
+            else:
+                intrinsic_value = fair_value_dcf or fair_value_dcf_multiple
+
+            buy_levels = compute_buy_price_levels(intrinsic_value)
+
+            mos_intrinsic = None
+            if intrinsic_value and current_price:
+                mos_intrinsic = (float(intrinsic_value) / float(current_price)) - 1.0
             if fair_value_dcf and current_price:
                 mos_dcf = (fair_value_dcf / current_price) - 1.0
                 implied_growth = reverse_dcf_implied_growth(
@@ -1326,11 +1397,11 @@ def main():
         """, unsafe_allow_html=True)
     
     with h5:
-        st.markdown(f"""
+                st.markdown(f"""
         <div class="metric-card" style="border: 2px solid {verdict_color};">
-            <div class="metric-label">Sektor</div>
-            <div class="metric-value" style="font-size: 1.2rem;">{sector[:20]}</div>
-            <div class="metric-delta" style="color: {verdict_color}; font-weight: 700;">{verdict}</div>
+            <div class="metric-label">Buy price (MOS ≥ 5%)</div>
+            <div class="metric-value" style="font-size: 1.6rem;">{fmt_money(buy_levels.get("buy")) if buy_levels.get("buy") else "—"}</div>
+            <div class="metric-delta" style="color: {verdict_color}; font-weight: 700;">{("Strong: " + fmt_money(buy_levels.get("strong_buy"))) if buy_levels.get("strong_buy") else "—"}</div>
         </div>
         """, unsafe_allow_html=True)
     
@@ -1501,7 +1572,8 @@ def main():
                         current_price=current_price,
                         scorecard=scorecard,
                         insider_signal=insider_signal,
-                        macro_events=MACRO_CALENDAR
+                        macro_events=MACRO_CALENDAR,
+                        suggested_buy_price=float(buy_levels.get('buy')) if buy_levels.get('buy') else None,
                     )
                     
                     st.session_state['ai_report'] = ai_report
