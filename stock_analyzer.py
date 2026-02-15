@@ -24,28 +24,6 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 import streamlit as st
-import streamlit.components.v1 as components
-
-# Streamlit page config MUST be the first Streamlit command
-# NOTE: We must not call any Streamlit APIs (including st.session_state) before set_page_config,
-# otherwise Streamlit may raise an error. We persist the desired sidebar state via an env var
-# Sidebar state: keep st.set_page_config as the first Streamlit call.
-_SIDEBAR_STATE = os.environ.get("STOCK_PICKER_SIDEBAR_STATE", "expanded")
-if _SIDEBAR_STATE not in ("expanded", "collapsed", "auto"):
-    _SIDEBAR_STATE = "expanded"
-
-st.set_page_config(
-    page_title="Stock Picker Pro v2.0",
-    page_icon="📈",
-    layout="wide",
-    initial_sidebar_state=_SIDEBAR_STATE,
-)
-
-# Session-state mirrors (safe to touch after set_page_config)
-if "sidebar_state" not in st.session_state:
-    st.session_state.sidebar_state = _SIDEBAR_STATE
-if "close_sidebar_now" not in st.session_state:
-    st.session_state.close_sidebar_now = False
 
 
 # --- Secrets / API keys (Streamlit Cloud: use Secrets) ---
@@ -78,28 +56,6 @@ APP_VERSION = "v2.0"
 
 GEMINI_MODEL = "gemini-2.0-flash-exp"
 
-
-
-# -----------------------------------------------------------------------------
-# Social & Guru (X/Twitter) handles
-# -----------------------------------------------------------------------------
-GURUS = {
-    "CZ/SK Scéna": {
-        "Jaroslav Brychta": "JaroslavBrychta",
-        "Dominik Stroukal": "stroukal",
-        "Jaroslav Šura": "jarsura",
-        "Tomáš Plecháč": "TPlechac",
-        "Akciový Guru": "akciovyguru",
-        "Nicnevim": "Nicnevim11",
-        "Bulios": "Bulios_cz",
-        "Michal Semotan": "MichalSemotan",
-    },
-    "Global & News": {
-        "Walter Bloomberg (News)": "DeItaone",
-        "Brian Feroldi (Education)": "BrianFeroldi",
-        "App Economy Insights": "AppEconomyInsights",
-    },
-}
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), ".stock_picker_pro")
 WATCHLIST_PATH = os.path.join(DATA_DIR, "watchlist.json")
@@ -193,6 +149,94 @@ def safe_div(a: Optional[float], b: Optional[float]) -> Optional[float]:
     return a / b
 
 
+def get_fcf_ttm_yfinance(t: "yf.Ticker", info: Dict[str, Any], *, debug: bool = True) -> Tuple[Optional[float], List[str]]:
+    """Robust FCF (TTM) from yfinance.
+
+    Uses quarterly_cashflow and sums last 4 quarters to get trailing-twelve-months FCF.
+    Preference order:
+      1) Sum last 4 quarters of 'Free Cash Flow'
+      2) Sum last 4 quarters of (CFO - CapEx)
+      3) Fallback to info['freeCashflow'] (less reliable; sometimes quarterly)
+
+    Returns (fcf_ttm, debug_lines).
+    """
+    dbg: List[str] = []
+
+    def _df_get(obj, attrs: List[str]) -> Optional[pd.DataFrame]:
+        for a in attrs:
+            try:
+                df = getattr(obj, a, None)
+                if isinstance(df, pd.DataFrame) and not df.empty:
+                    return df
+            except Exception:
+                continue
+        return None
+
+    def _sum_last4(df: pd.DataFrame, row_candidates: List[str]) -> Optional[float]:
+        try:
+            cols = list(df.columns)
+            if not cols:
+                return None
+            cols_sorted = sorted(cols, reverse=True)
+            cols_last4 = cols_sorted[:4]
+
+            # exact / loose row match
+            idx_lower = [str(i).lower() for i in df.index]
+
+            for rn in row_candidates:
+                if rn in df.index:
+                    vals = [safe_float(df.loc[rn, c]) for c in cols_last4]
+                    vals = [v for v in vals if v is not None]
+                    if len(vals) >= 3:
+                        return float(sum(vals))
+
+                key = rn.lower()
+                for i, raw in enumerate(idx_lower):
+                    if key == raw or key in raw:
+                        vals = [safe_float(df.iloc[i][c]) for c in cols_last4]
+                        vals = [v for v in vals if v is not None]
+                        if len(vals) >= 3:
+                            return float(sum(vals))
+        except Exception:
+            return None
+        return None
+
+    qcf = _df_get(t, ["quarterly_cashflow", "quarterly_cashflow_stmt", "quarterly_cashflow_statement"])
+    if qcf is not None:
+        fcf_sum = _sum_last4(qcf, ["Free Cash Flow", "FreeCashFlow"])
+        if fcf_sum is not None and fcf_sum != 0:
+            dbg.append("FCF source: quarterly_cashflow['Free Cash Flow'] (TTM sum)")
+            if debug:
+                print(f"Použité roční FCF (TTM): ${fcf_sum/1e9:.2f} miliard")
+            return fcf_sum, dbg
+
+        cfo_sum = _sum_last4(qcf, ["Total Cash From Operating Activities", "Operating Cash Flow", "Cash Flow From Continuing Operating Activities"])
+        capex_sum = _sum_last4(qcf, ["Capital Expenditures", "CapitalExpenditures", "Capex"])
+        if cfo_sum is not None and capex_sum is not None:
+            fcf_calc = float(cfo_sum - capex_sum)
+            dbg.append("FCF source: quarterly CFO - CapEx (TTM sum)")
+            if debug:
+                print(f"Použité roční FCF (TTM): ${fcf_calc/1e9:.2f} miliard")
+            return fcf_calc, dbg
+
+        dbg.append("quarterly_cashflow present but required rows missing")
+
+    fcf_fallback = safe_float(info.get("freeCashflow"))
+    if fcf_fallback is not None:
+        dbg.append("FCF source: info.freeCashflow (fallback; may be quarterly)")
+        if debug:
+            print(f"Použité roční FCF (fallback): ${fcf_fallback/1e9:.2f} miliard")
+        return fcf_fallback, dbg
+
+    dbg.append("FCF unavailable")
+    if debug:
+        print("Použité roční FCF (TTM): N/A (chybí data)")
+    return None, dbg
+
+
+
+
+
 def fmt_num(x: Any, digits: int = 2) -> str:
     v = safe_float(x)
     if v is None:
@@ -262,171 +306,6 @@ def fetch_financials(ticker: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFr
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
-def get_fcf_ttm_yfinance(ticker: str, market_cap: Optional[float] = None) -> Tuple[Optional[float], List[str]]:
-    """Robustně spočítá roční Free Cash Flow (TTM) z yfinance quarterly_cashflow.
-
-    Pravidla:
-    - Primárně sečte poslední 4 dostupné kvartály (TTM).
-    - Když chybí řádek 'Free Cash Flow', spočítá FCF jako Operating Cash Flow - |CapEx|.
-    - Pokud jsou dostupná jen 1-3 kvartální čísla, annualizuje průměrem ×4.
-    - Sanity check: pro obří firmy (MarketCap > $1T) a podezřele nízké FCF (< $30B)
-      aplikuje pojistku násobení 4× (typicky když provider vrátí jen 1 kvartál).
-    - Vrací (fcf_ttm, dbg) kde dbg je list informativních zpráv.
-    """
-    dbg: List[str] = []
-    try:
-        t = yf.Ticker(ticker)
-        qcf = getattr(t, "quarterly_cashflow", None)
-        if qcf is None or not isinstance(qcf, pd.DataFrame) or qcf.empty:
-            dbg.append("FCF: quarterly_cashflow není k dispozici (prázdné). Zkouším fallback.")
-            qcf = pd.DataFrame()
-
-        def _pick_row(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
-            if df is None or df.empty:
-                return None
-            idx = set(map(str, df.index))
-            for c in candidates:
-                if c in idx:
-                    return c
-            # zkus case-insensitive match
-            low_map = {str(i).strip().lower(): str(i) for i in df.index}
-            for c in candidates:
-                key = c.strip().lower()
-                if key in low_map:
-                    return low_map[key]
-            return None
-
-        def _sorted_quarter_cols(df: pd.DataFrame) -> List[Any]:
-            cols = list(df.columns)
-            if not cols:
-                return []
-            dts = pd.to_datetime(cols, errors="coerce")
-            if dts.notna().any():
-                order = sorted(range(len(cols)), key=lambda i: dts[i], reverse=True)
-                return [cols[i] for i in order]
-            return cols  # fallback: keep original order
-
-        # 1) vyber poslední dostupné kvartály
-        cols_sorted = _sorted_quarter_cols(qcf)
-        cols_sel = cols_sorted[:4] if cols_sorted else []
-        if cols_sel:
-            dbg.append(f"FCF: Načítám kvartály: {', '.join([str(c) for c in cols_sel])}")
-        else:
-            dbg.append("FCF: Nenalezeny žádné kvartální sloupce v quarterly_cashflow.")
-
-        # 2) primárně: přímý řádek Free Cash Flow
-        fcf_row = _pick_row(qcf, ["Free Cash Flow", "FreeCashFlow", "Free cash flow"])
-        used_method = None
-
-        fcf_quarters = None
-        non_null = 0
-
-        if fcf_row and cols_sel:
-            s = pd.to_numeric(qcf.loc[fcf_row, cols_sel], errors="coerce")
-            non_null = int(s.notna().sum())
-            if non_null > 0:
-                fcf_quarters = s
-                used_method = f"quarterly row '{fcf_row}'"
-        # 3) fallback: OCF - |CapEx|
-        if fcf_quarters is None and cols_sel:
-            ocf_row = _pick_row(qcf, [
-                "Operating Cash Flow",
-                "Total Cash From Operating Activities",
-                "Total Cash From Operating Activities (Continuing Operations)",
-                "Cash Flow From Continuing Operating Activities",
-                "Net Cash Provided By Operating Activities",
-            ])
-            capex_row = _pick_row(qcf, [
-                "Capital Expenditures",
-                "Capital Expenditure",
-                "CapitalExpenditures",
-                "Purchase Of PPE",
-                "Purchase of Property Plant Equipment",
-            ])
-            if ocf_row and capex_row:
-                ocf = pd.to_numeric(qcf.loc[ocf_row, cols_sel], errors="coerce")
-                capex = pd.to_numeric(qcf.loc[capex_row, cols_sel], errors="coerce")
-                non_null = int((ocf.notna() & capex.notna()).sum())
-                if non_null > 0:
-                    # CapEx bývá záporný; chceme: FCF = OCF - |CapEx|
-                    fcf_quarters = ocf - capex.abs()
-                    used_method = f"computed: '{ocf_row}' - |'{capex_row}'|"
-
-        # 4) pokud pořád nic, fallback na annual cashflow / info
-        if fcf_quarters is None:
-            # annual cashflow
-            acf = getattr(t, "cashflow", None)
-            if isinstance(acf, pd.DataFrame) and not acf.empty:
-                acf_cols = _sorted_quarter_cols(acf)[:1]  # nejnovější rok
-                fcf_row_a = _pick_row(acf, ["Free Cash Flow", "FreeCashFlow", "Free cash flow"])
-                if fcf_row_a and acf_cols:
-                    v = safe_float(acf.loc[fcf_row_a, acf_cols[0]])
-                    if v is not None:
-                        dbg.append("FCF: Používám annual cashflow (nejnovější rok) – řádek Free Cash Flow.")
-                        used_method = "annual row 'Free Cash Flow'"
-                        fcf_ttm = float(v)
-                        msg = f"Použité roční FCF (TTM): ${fcf_ttm/1e9:.1f} miliard ({used_method})"
-                        dbg.append(msg)
-                        print(msg)
-                        return fcf_ttm, dbg
-
-            # last resort: info['freeCashflow']
-            try:
-                info = getattr(t, "info", None) or {}
-            except Exception:
-                info = {}
-            v = safe_float(info.get("freeCashflow"))
-            if v is not None:
-                used_method = "info['freeCashflow'] (fallback)"
-                fcf_ttm = float(v)
-                msg = f"Použité roční FCF (TTM): ${fcf_ttm/1e9:.1f} miliard ({used_method})"
-                dbg.append(msg)
-                print(msg)
-                return fcf_ttm, dbg
-
-            dbg.append("FCF: Nepodařilo se získat FCF ani z quarterly ani z annual ani z info.")
-            return None, dbg
-
-        # 5) TTM / extrapolace
-        fcf_vals = pd.to_numeric(fcf_quarters, errors="coerce").dropna()
-        n = int(fcf_vals.shape[0])
-        applied_extrap = False
-        used_sum4 = False
-
-        if n >= 4:
-            fcf_ttm = float(fcf_vals.iloc[:4].sum())
-            used_sum4 = True
-        elif n > 0:
-            # annualizace průměrem ×4
-            fcf_ttm = float(fcf_vals.mean() * 4.0)
-            applied_extrap = True
-        else:
-            dbg.append("FCF: kvartální hodnoty jsou všechny NaN.")
-            return None, dbg
-
-        # 6) Sanity check (market cap > 1T & FCF < 30B) -> 4×
-        mc = safe_float(market_cap)
-        if (not applied_extrap) and used_sum4 and mc and mc > 1e12 and fcf_ttm < 30e9:
-            fcf_ttm *= 4.0
-            dbg.append("FCF: Sanity check aktivován (MarketCap > $1T a FCF < $30B) -> násobím 4× (podezření na 1 kvartál).")
-
-        # 7) Debug zprávy
-        if used_method:
-            dbg.append(f"FCF metoda: {used_method}. Kvartály použity: {n}.")
-        if applied_extrap:
-            dbg.append(f"FCF: Extrapolace do roční báze (k dispozici {n} kvartály) -> průměr ×4.")
-        if used_sum4:
-            dbg.append("FCF: TTM = součet posledních 4 kvartálů.")
-
-        msg = f"Použité roční FCF (TTM): ${fcf_ttm/1e9:.1f} miliard"
-        dbg.append(msg)
-        print(msg)
-
-        return fcf_ttm, dbg
-    except Exception as e:
-        dbg.append(f"FCF: chyba při výpočtu TTM: {e}")
-        return None, dbg
 @st.cache_data(show_spinner=False, ttl=3600)
 def get_all_time_high(ticker: str) -> Optional[float]:
     """Get all-time high price."""
@@ -502,9 +381,9 @@ def extract_metrics(info: Dict[str, Any], ticker: str) -> Dict[str, Metric]:
     total_debt = safe_float(info.get("totalDebt"))
     
     # Cash flow
+    fcf, _fcf_dbg = get_fcf_ttm_yfinance(t, info, debug=True)
     operating_cashflow = safe_float(info.get("operatingCashflow"))
     market_cap = safe_float(info.get("marketCap"))
-    fcf, _fcf_dbg = get_fcf_ttm_yfinance(ticker, market_cap)
     fcf_yield = safe_div(fcf, market_cap) if fcf and market_cap else None
     
     # Analyst targets
@@ -628,49 +507,69 @@ def calculate_dcf_fair_value(
     terminal_growth: float = 0.03,
     wacc: float = 0.10,
     years: int = 5,
-    shares_outstanding: Optional[float] = None,
-    exit_multiple: Optional[float] = None,
-    total_cash: float = 0.0,
-    total_debt: float = 0.0,
+    shares_outstanding: Optional[float] = None
 ) -> Optional[float]:
-    """DCF calculation.
-
-    Supports two terminal value methods:
-    - Exit Multiple (if exit_multiple is provided and > 0)
-    - Gordon Growth (fallback when exit_multiple is None)
-    """
+    """DCF calculation."""
     if fcf <= 0 or shares_outstanding is None or shares_outstanding <= 0:
         return None
-
+    
     try:
         pv_sum = 0.0
         current_fcf = fcf
-
-        # Project and discount annual FCFs
+        
         for year in range(1, years + 1):
             current_fcf *= (1 + growth_rate)
             pv_sum += current_fcf / ((1 + wacc) ** year)
-
-        if exit_multiple is not None and safe_float(exit_multiple) and safe_float(exit_multiple) > 0:
-            # Exit Multiple terminal value
-            terminal_value = current_fcf * float(exit_multiple)
-        else:
-            # Gordon Growth terminal value
-            terminal_fcf = current_fcf * (1 + terminal_growth)
-            terminal_value = terminal_fcf / (wacc - terminal_growth)
-
+        
+        terminal_fcf = current_fcf * (1 + terminal_growth)
+        terminal_value = terminal_fcf / (wacc - terminal_growth)
         pv_terminal = terminal_value / ((1 + wacc) ** years)
-
+        
         enterprise_value = pv_sum + pv_terminal
-
-        # Equity bridge (optional)
-        equity_value = enterprise_value + (total_cash or 0.0) - (total_debt or 0.0)
-
-        fair_value_per_share = equity_value / shares_outstanding
+        fair_value_per_share = enterprise_value / shares_outstanding
+        
         return fair_value_per_share
     except Exception:
         return None
 
+
+
+
+def calculate_dcf_intrinsic_value_multiple(
+    fcf: float,
+    shares_outstanding: float,
+    growth_rate: float = 0.06,
+    discount_rate: float = 0.10,
+    years: int = 5,
+    terminal_multiple: float = 18.0,
+) -> float | None:
+    """Intrinsic value per share via a simple DCF with a terminal FCF multiple (15–20x typical)."""
+    try:
+        if fcf is None or shares_outstanding in (None, 0) or years <= 0:
+            return None
+        if discount_rate <= -0.99:
+            return None
+
+        pv = 0.0
+        fcf_t = float(fcf)
+        for t in range(1, int(years) + 1):
+            fcf_t *= (1.0 + float(growth_rate))
+            pv += fcf_t / ((1.0 + float(discount_rate)) ** t)
+
+        terminal_value = float(terminal_multiple) * fcf_t
+        pv += terminal_value / ((1.0 + float(discount_rate)) ** years)
+
+        return pv / float(shares_outstanding)
+    except Exception:
+        return None
+
+
+def compute_buy_price_levels(fair_value: float | None) -> dict:
+    """Practical buy thresholds derived from a fair value."""
+    if not fair_value:
+        return {"buy": None, "strong_buy": None, "must_buy": None}
+    fv = float(fair_value)
+    return {"buy": fv * 0.95, "strong_buy": fv * 0.80, "must_buy": fv * 0.70}
 
 def reverse_dcf_implied_growth(
     current_price: float,
@@ -678,24 +577,15 @@ def reverse_dcf_implied_growth(
     terminal_growth: float = 0.03,
     wacc: float = 0.10,
     years: int = 5,
-    shares_outstanding: Optional[float] = None,
-    exit_multiple: Optional[float] = None,
-    total_cash: float = 0.0,
-    total_debt: float = 0.0,
+    shares_outstanding: Optional[float] = None
 ) -> Optional[float]:
-    """Calculate implied growth rate from current price.
-
-    Uses the same terminal method as calculate_dcf_fair_value:
-    - Exit Multiple if exit_multiple is provided
-    - Otherwise Gordon Growth
-    """
-
+    """Calculate implied growth rate from current price."""
     if fcf <= 0 or shares_outstanding is None or shares_outstanding <= 0:
         return None
     
     try:
         def dcf_at_growth(g: float) -> float:
-            fv = calculate_dcf_fair_value(fcf, g, terminal_growth, wacc, years, shares_outstanding, exit_multiple=exit_multiple, total_cash=total_cash, total_debt=total_debt)
+            fv = calculate_dcf_fair_value(fcf, g, terminal_growth, wacc, years, shares_outstanding)
             return fv if fv else 0.0
         
         low, high = -0.5, 1.0
@@ -713,84 +603,6 @@ def reverse_dcf_implied_growth(
     except Exception:
         return None
 
-
-
-
-# ============================================================================
-# SMART DCF PARAMS
-# ============================================================================
-
-def estimate_smart_params(info: Dict[str, Any], metrics: Dict[str, "Metric"]) -> Dict[str, float]:
-    """Estimate smart DCF parameters from Yahoo Finance info and extracted metrics.
-
-    Logic:
-      - WACC (discount) from beta: RiskFree 4.2% + Beta * 5%, clamped to 8%..15% (fallback 10%)
-      - Growth from avg(revenue_growth, earnings_growth), clamped to 2%..(15% for mega-caps, else 25%)
-      - Exit multiple by sector; mega-cap Tech/Communication uses a more conservative 20x
-
-    Returns:
-        {
-            "wacc": float,
-            "growth": float,
-            "exit_multiple": float,
-        }
-    """
-    # --- Market Cap & Mega Cap flag ---
-    market_cap = safe_float(info.get("marketCap"))
-    is_mega_cap = bool(market_cap is not None and market_cap > 200e9)
-
-    # --- WACC from Beta ---
-    beta = safe_float(info.get("beta"))
-    if beta is None:
-        wacc = 0.10
-    else:
-        # RiskFree 4.2% + Beta * 5%
-        wacc = 0.042 + (beta * 0.05)
-
-    # Clamp to 8% - 15% (raise floor to avoid underestimating risk)
-    wacc = max(0.08, min(0.15, wacc))
-
-    # --- Growth from Revenue + Earnings growth ---
-    def _mval(key: str) -> Optional[float]:
-        try:
-            m = metrics.get(key) if metrics else None
-            if m is None:
-                return None
-            v = getattr(m, "value", m)
-            return safe_float(v)
-        except Exception:
-            return None
-
-    rg = _mval("revenue_growth")
-    eg = _mval("earnings_growth")
-    vals = [v for v in (rg, eg) if v is not None]
-
-    if vals:
-        growth = float(sum(vals) / len(vals))
-    else:
-        growth = 0.10
-
-    # Clamp to 2% - cap (mega caps max 15%, others max 25%)
-    growth_cap = 0.15 if is_mega_cap else 0.25
-    growth = max(0.02, min(growth_cap, growth))
-
-    # --- Exit Multiple by sector ---
-    sector = (info.get("sector") or "").lower()
-
-    if "technology" in sector or "communication" in sector:
-        # Default Tech/Communication multiple
-        exit_multiple = 25.0
-        # Mega-cap Tech/Communication: more conservative multiple
-        if is_mega_cap:
-            exit_multiple = 20.0
-    elif "financial" in sector:
-        exit_multiple = 12.0
-    elif "health" in sector:
-        exit_multiple = 20.0
-    else:
-        exit_multiple = 15.0
-
-    return {"wacc": wacc, "growth": growth, "exit_multiple": exit_multiple}
 
 # ============================================================================
 # INSIDER TRADING ANALYSIS
@@ -979,17 +791,13 @@ def fetch_peer_comparison(ticker: str, peers: List[str]) -> pd.DataFrame:
             if not info:
                 continue
             
-            mc = safe_float(info.get("marketCap"))
-            fcf_ttm_peer, _ = get_fcf_ttm_yfinance(t, mc)
-            fcf_yield_peer = safe_div(fcf_ttm_peer, mc) if fcf_ttm_peer and mc else None
-
             rows.append({
                 "Ticker": t,
                 "P/E": safe_float(info.get("trailingPE")),
                 "Op. Margin": safe_float(info.get("operatingMargins")),
                 "Rev. Growth": safe_float(info.get("revenueGrowth")),
-                "FCF Yield": fcf_yield_peer,
-                "Market Cap": mc,
+                "FCF Yield": safe_div(fcf, safe_float(info.get("marketCap"))),
+                "Market Cap": safe_float(info.get("marketCap")),
             })
         except Exception:
             continue
@@ -1010,7 +818,8 @@ def generate_ai_analyst_report(
     current_price: Optional[float],
     scorecard: float,
     insider_signal: Dict[str, Any],
-    macro_events: List[Dict[str, Any]]
+    macro_events: List[Dict[str, Any]],
+    suggested_buy_price: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Generate comprehensive AI analyst report using Gemini.
@@ -1038,6 +847,14 @@ def generate_ai_analyst_report(
             "confidence": "N/A"
         }
     
+    # Deterministic fallback "wait/buy" price: require at least 5% MOS vs DCF.
+    if suggested_buy_price is None:
+        try:
+            if dcf_fair_value is not None and float(dcf_fair_value) > 0:
+                suggested_buy_price = float(dcf_fair_value) * 0.95
+        except Exception:
+            suggested_buy_price = None
+
     # Prepare context
     context = f"""
 Analyzuj akci {company} ({ticker}) a poskytni hloubkový investiční report.
@@ -1045,6 +862,7 @@ Analyzuj akci {company} ({ticker}) a poskytni hloubkový investiční report.
 AKTUÁLNÍ DATA:
 - Cena: {fmt_money(current_price)}
 - Férovka (DCF): {fmt_money(dcf_fair_value)}
+- Doporučená nákupní cena (MOS ≥ 5% vs DCF): {fmt_money(suggested_buy_price)}
 - Scorecard: {scorecard:.1f}/100
 - P/E: {fmt_num(metrics.get('pe').value if metrics.get('pe') else None)}
 - Revenue Growth: {fmt_pct(metrics.get('revenue_growth').value if metrics.get('revenue_growth') else None)}
@@ -1094,6 +912,10 @@ Vrať POUZE validní JSON s těmito klíči (žádný další text):
         result_text = result_text.strip()
         
         result = json.loads(result_text)
+
+        # If the model omits wait_for_price, fall back to deterministic suggested_buy_price.
+        if result.get("wait_for_price") in (None, "", "N/A") and suggested_buy_price is not None:
+            result["wait_for_price"] = suggested_buy_price
         return result
     
     except Exception as e:
@@ -1102,7 +924,7 @@ Vrať POUZE validní JSON s těmito klíči (žádný další text):
             "bull_case": ["Chyba při generování"],
             "bear_case": [],
             "verdict": "ERROR",
-            "wait_for_price": None,
+            "wait_for_price": suggested_buy_price,
             "reasoning": "Technická chyba",
             "confidence": "N/A"
         }
@@ -1298,59 +1120,57 @@ def get_advanced_verdict(
 # ============================================================================
 
 
-def render_twitter_timeline(handle: str, height: int = 600) -> None:
-    """Render X/Twitter content without embeds (widgets are often blocked)."""
-    handle = (handle or "").lstrip("@").strip()
-    if not handle:
-        st.info("Vyber guru účet.")
-        return
-    st.warning("⚠️ X (Twitter) často blokuje náhledy v cizích aplikacích. Použij přímý odkaz níže.")
-    st.markdown(f"👉 Otevřít profil **@{handle}**: https://twitter.com/{handle}")
+def _on_analyze_click():
+    # Called before the script reruns after clicking Analyze.
+    st.session_state["show_sidebar"] = False
+    st.session_state["_analyze_requested"] = True
 
-def analyze_social_text_with_gemini(text: str) -> str:
-    """Analyze manually pasted tweet/comment using Gemini."""
-    text = (text or "").strip()
-    if not text:
-        return "Chybí text k analýze."
 
-    if not GEMINI_API_KEY:
-        return "AI analýza není dostupná (chybí GEMINI_API_KEY)."
-
-    prompt = f"""Jako seniorní investor analyzuj tento text z sociálních sítí týkající se financí.
-
-1) Jaký je sentiment (Bullish/Bearish/Neutral)?
-2) Jsou tam nějaká fakta nebo jen šum?
-3) Verdikt pro investora.
-
-TEXT:
-{text}
-"""
-
-    try:
-        # Try new google-genai SDK first
-        try:
-            from google import genai
-            client = genai.Client(api_key=GEMINI_API_KEY)
-            response = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=prompt
-            )
-            return (response.text or "").strip()
-        except ImportError:
-            # Fallback to old SDK
-            import google.generativeai as genai
-            genai.configure(api_key=GEMINI_API_KEY)
-            model = genai.GenerativeModel(GEMINI_MODEL)
-            response = model.generate_content(prompt)
-            return (getattr(response, "text", "") or "").strip()
-    except Exception as e:
-        return f"Chyba při volání Gemini: {e}"
 
 
 def main():
     """Main application entry point."""
     
-    # Page configuration is set at module import (must be first Streamlit command)
+
+# ---- Sidebar visibility (mobile) ----
+if "show_sidebar" not in st.session_state:
+    st.session_state["show_sidebar"] = True
+
+# Apply sidebar CSS early (before rendering sidebar widgets) so it takes effect on the same rerun
+if not st.session_state.get("show_sidebar", True):
+    st.markdown(
+        """
+        <style>
+          /* Hide sidebar completely */
+          section[data-testid="stSidebar"] { display: none !important; }
+          /* Ex
+    analyze_requested = bool(st.session_state.get("_analyze_requested", False))
+    if analyze_requested:
+        # clear the flag immediately to avoid repeated reruns
+        st.session_state["_analyze_requested"] = False
+pand main content when sidebar hidden */
+          div[data-testid="stAppViewContainer"] { margin-left: 0 !important; }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+    # Page configuration - WIDE LAYOUT
+    st.set_page_config(
+        page_title="Stock Picker Pro v2.0",
+        page_icon="📈",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+
+    # Sidebar UX (mobile-friendly): allow hiding the sidebar after pressing "Analyzovat".
+    if "sidebar_visible" not in st.session_state:
+        st.session_state["sidebar_visible"] = True
+
+    def _hide_sidebar() -> None:
+        st.session_state["sidebar_visible"] = False
+
+    def _show_sidebar() -> None:
+        st.session_state["sidebar_visible"] = True
     
     # Custom CSS
     st.markdown("""
@@ -1442,137 +1262,117 @@ def main():
 }
 </style>
     """, unsafe_allow_html=True)
+
+    # When hidden, fully remove sidebar overlay (helps on mobile so content isn't blocked).
+    if not st.session_state.get("sidebar_visible", True):
+        st.markdown(
+            """
+            <style>
+              [data-testid="stSidebar"], section[data-testid="stSidebar"] { display: none !important; }
+              [data-testid="collapsedControl"] { display: none !important; }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
     
     # ========================================================================
     # SIDEBAR - Settings & Controls
     # ========================================================================
-    
-    with st.sidebar:
-        st.title("📈 Stock Picker Pro")
-        st.caption("v2.0 - Advanced Quant Analysis")
-        st.markdown("---")
-        
-        # Ticker input
-        ticker_input = st.text_input(
-            "Ticker Symbol",
-            value="AAPL",
-            help="Zadej ticker (např. AAPL, MSFT, GOOGL)",
-            max_chars=10
-        ).upper().strip()
-        
-        def close_sidebar():
-            st.session_state.sidebar_state = "collapsed"
-            st.session_state.close_sidebar_now = True
-            os.environ["STOCK_PICKER_SIDEBAR_STATE"] = "collapsed"
-        analyze_btn = st.button(
-            "🔍 Analyzovat",
-            type="primary",
-            use_container_width=True,
-            on_click=close_sidebar,
-        )
 
-        st.markdown("---")
-        
-        # DCF Settings
-        with st.expander("⚙️ DCF Parametry", expanded=False):
-            smart_dcf = st.checkbox(
-                "⚡ Smart DCF (Automaticky)",
-                value=True,
-                help="Automaticky odhadne WACC, Growth a Exit Multiple podle bety, růstu a sektoru."
+    # If the sidebar is hidden (after analyze), show a compact button to bring it back.
+    if not st.session_state.get("sidebar_visible", True):
+        st.button("☰ Menu", key="open_menu_btn", on_click=_show_sidebar)
+
+    # Defaults (so the app keeps working even when sidebar is hidden)
+    ticker_input = st.session_state.get("ticker_selected", "AAPL")
+    analyze_btn = False
+    dcf_growth = st.session_state.get("dcf_growth", 0.10)
+    dcf_terminal = st.session_state.get("dcf_terminal", 0.03)
+    dcf_wacc = st.session_state.get("dcf_wacc", 0.10)
+    dcf_years = st.session_state.get("dcf_years", 5)
+    use_ai = st.session_state.get("use_ai", bool(GEMINI_API_KEY))
+
+    if st.session_state.get("sidebar_visible", True):
+        with st.sidebar:
+            st.title("📈 Stock Picker Pro")
+            st.caption("v2.0 - Advanced Quant Analysis")
+            st.markdown("---")
+
+            # Ticker input
+            ticker_input = st.text_input(
+                "Ticker Symbol",
+                value="AAPL",
+                help="Zadej ticker (např. AAPL, MSFT, GOOGL)",
+                max_chars=10,
+            ).upper().strip()
+
+            analyze_btn = st.button(
+                "🔍 Analyzovat",
+                type="primary",
+                use_container_width=True,
+                key="analyze_btn",
+                on_click=_hide_sidebar,
             )
-            dcf_growth = st.slider(
-                "Růst FCF (roční)",
-                0.0, 0.50, 0.10, 0.01,
-                help="Očekávaný roční růst Free Cash Flow",
-                disabled=smart_dcf
-            )
-            dcf_terminal = st.slider(
-                "Terminální růst",
-                0.0, 0.10, 0.03, 0.01,
-                help="Dlouhodobý růst po projektovaném období"
-            )
-            dcf_wacc = st.slider(
-                "WACC (diskont)",
-                0.05, 0.20, 0.10, 0.01,
-                help="Vážené průměrné náklady kapitálu",
-                disabled=smart_dcf
-            )
-            dcf_years = st.slider(
-                "Projektované roky",
-                3, 10, 5, 1,
-                help="Počet let pro projekci FCF"
-            )
-            dcf_exit_multiple = st.slider(
-                "Exit Multiple (FCF)",
-                10.0, 50.0, 25.0, 1.0,
-                help="Násobek FCF v posledním projektovaném roce pro terminal value (Exit Multiple metoda)",
-                disabled=smart_dcf
-            )
-        st.markdown("---")
-        
-        # AI Settings
-        with st.expander("🤖 AI Nastavení", expanded=False):
-            use_ai = st.checkbox(
-                "Povolit AI analýzu",
-                value=bool(GEMINI_API_KEY),
-                help="Vyžaduje Gemini API klíč",
-                disabled=not GEMINI_API_KEY
-            )
-            if not GEMINI_API_KEY:
-                st.warning("⚠️ Nastav GEMINI_API_KEY v kódu")
-        
-        st.markdown("---")
-        
-        # Quick links
-        st.markdown("### 🔗 Odkazy")
-        if ticker_input:
-            st.markdown(f"- [Yahoo Finance](https://finance.yahoo.com/quote/{ticker_input})")
-            st.markdown(f"- [SEC Filings](https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=&type=&dateb=&owner=exclude&count=40&search_text={ticker_input})")
-            st.markdown(f"- [Finviz](https://finviz.com/quote.ashx?t={ticker_input})")
+
+            st.markdown("---")
+
+            # DCF Settings
+            with st.expander("⚙️ DCF Parametry", expanded=False):
+                dcf_growth = st.slider(
+                    "Růst FCF (roční)",
+                    0.0, 0.50, 0.10, 0.01,
+                    help="Očekávaný roční růst Free Cash Flow",
+                )
+                dcf_terminal = st.slider(
+                    "Terminální růst",
+                    0.0, 0.10, 0.03, 0.01,
+                    help="Dlouhodobý růst po projektovaném období",
+                )
+                dcf_wacc = st.slider(
+                    "WACC (diskont)",
+                    0.05, 0.20, 0.10, 0.01,
+                    help="Vážené průměrné náklady kapitálu",
+                )
+                dcf_years = st.slider(
+                    "Projektované roky",
+                    3, 10, 5, 1,
+                    help="Počet let pro projekci FCF",
+                )
+
+                # persist
+                st.session_state["dcf_growth"] = dcf_growth
+                st.session_state["dcf_terminal"] = dcf_terminal
+                st.session_state["dcf_wacc"] = dcf_wacc
+                st.session_state["dcf_years"] = dcf_years
+
+            st.markdown("---")
+
+            # AI Settings
+            with st.expander("🤖 AI Nastavení", expanded=False):
+                use_ai = st.checkbox(
+                    "Povolit AI analýzu",
+                    value=bool(GEMINI_API_KEY),
+                    help="Vyžaduje Gemini API klíč",
+                    disabled=not GEMINI_API_KEY,
+                )
+                st.session_state["use_ai"] = use_ai
+                if not GEMINI_API_KEY:
+                    st.warning("⚠️ Nastav GEMINI_API_KEY v kódu")
+
+            st.markdown("---")
+
+            # Quick links
+            st.markdown("### 🔗 Odkazy")
+            if ticker_input:
+                st.markdown(f"- [Yahoo Finance](https://finance.yahoo.com/quote/{ticker_input})")
+                st.markdown(
+                    f"- [SEC Filings](https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=&type=&dateb=&owner=exclude&count=40&search_text={ticker_input})"
+                )
+                st.markdown(f"- [Finviz](https://finviz.com/quote.ashx?t={ticker_input})")
     
     # ========================================================================
     # MAIN CONTENT
     # ========================================================================
-    
-
-
-    # Force-close mobile sidebar drawer after clicking Analyze
-    if st.session_state.get("close_sidebar_now"):
-        components.html(
-            """
-            <script>
-            (function() {
-              function tryClose() {
-                const candidates = [
-                  'button[aria-label="Close sidebar"]',
-                  'button[title="Close sidebar"]',
-                  'button[data-testid="stSidebarCollapseButton"]',
-                  'button[data-testid="stSidebarToggleButton"]',
-                  'button[aria-label="Toggle sidebar"]'
-                ];
-                for (const sel of candidates) {
-                  const btn = document.querySelector(sel);
-                  if (btn) { btn.click(); return true; }
-                }
-                const header = document.querySelector('header');
-                if (header) {
-                  const b = header.querySelector('button');
-                  if (b) { b.click(); return true; }
-                }
-                return false;
-              }
-              let attempts = 0;
-              const timer = setInterval(() => {
-                attempts++;
-                if (tryClose() || attempts > 12) clearInterval(timer);
-              }, 120);
-            })();
-            </script>
-            """,
-            height=0,
-            width=0,
-        )
-        st.session_state.close_sidebar_now = False
     
     # Welcome screen if no analysis yet
     if not analyze_btn and "last_ticker" not in st.session_state:
@@ -1582,6 +1382,10 @@ def main():
     # Process ticker
     ticker = ticker_input if analyze_btn else st.session_state.get("last_ticker", "AAPL")
     st.session_state["last_ticker"] = ticker
+
+    # Auto-hide sidebar after analysis submission (useful on mobile)
+    if analyze_btn:
+        _hide_sidebar()
     
     # Fetch data
     with st.spinner(f"📊 Načítám data pro {ticker}..."):
@@ -1600,62 +1404,46 @@ def main():
         ath = get_all_time_high(ticker)
         insider_df = fetch_insider_transactions(ticker)
         insider_signal = compute_insider_pro_signal(insider_df)
-
-        # DCF calculations
-        market_cap_for_fcf = safe_float(info.get("marketCap"))
-        fcf, fcf_dbg = get_fcf_ttm_yfinance(ticker, market_cap_for_fcf)
-        for _m in (fcf_dbg or []):
-            print(_m)
+        
+        # DCF calculations (robust FCF TTM from quarterly cashflow)
+        fcf, _fcf_dbg = get_fcf_ttm_yfinance(t, info, debug=True)
         shares = safe_float(info.get("sharesOutstanding"))
         current_price = metrics.get("price").value if metrics.get("price") else None
-
-        # Smart vs Manual DCF params
-        smart_params = estimate_smart_params(info, metrics) if smart_dcf else None
-        used_growth = smart_params["growth"] if smart_params else dcf_growth
-        used_wacc = smart_params["wacc"] if smart_params else dcf_wacc
-        used_exit_multiple = smart_params["exit_multiple"] if smart_params else float(dcf_exit_multiple)
-        dcf_param_source = "Smart" if smart_params else "Manual"
-        st.session_state["used_dcf_params"] = {
-            "growth": used_growth,
-            "wacc": used_wacc,
-            "exit_multiple": used_exit_multiple,
-            "source": dcf_param_source,
-        }
-
+        
         fair_value_dcf = None
         mos_dcf = None
         implied_growth = None
-
+        
         if fcf and shares and fcf > 0:
-            total_cash = safe_float(info.get("totalCash")) or 0
-            total_debt = safe_float(info.get("totalDebt")) or 0
-
             fair_value_dcf = calculate_dcf_fair_value(
-                fcf,
-                growth_rate=used_growth,
-                terminal_growth=dcf_terminal,
-                wacc=used_wacc,
-                years=dcf_years,
-                shares_outstanding=shares,
-                exit_multiple=used_exit_multiple,
-                total_cash=total_cash,
-                total_debt=total_debt,
+                fcf, dcf_growth, dcf_terminal, dcf_wacc, dcf_years, shares
+            )
+            fair_value_dcf_multiple = calculate_dcf_intrinsic_value_multiple(
+                fcf=fcf,
+                shares_outstanding=shares_outstanding,
+                growth_rate=fcf_growth,
+                discount_rate=discount_rate,
+                years=5,
+                terminal_multiple=terminal_multiple,
             )
 
+            intrinsic_value = None
+            if fair_value_dcf and fair_value_dcf_multiple:
+                intrinsic_value = min(float(fair_value_dcf), float(fair_value_dcf_multiple))
+            else:
+                intrinsic_value = fair_value_dcf or fair_value_dcf_multiple
+
+            buy_levels = compute_buy_price_levels(intrinsic_value)
+
+            mos_intrinsic = None
+            if intrinsic_value and current_price:
+                mos_intrinsic = (float(intrinsic_value) / float(current_price)) - 1.0
             if fair_value_dcf and current_price:
                 mos_dcf = (fair_value_dcf / current_price) - 1.0
                 implied_growth = reverse_dcf_implied_growth(
-                    current_price,
-                    fcf,
-                    terminal_growth=dcf_terminal,
-                    wacc=used_wacc,
-                    years=dcf_years,
-                    shares_outstanding=shares,
-                    exit_multiple=used_exit_multiple,
-                    total_cash=total_cash,
-                    total_debt=total_debt,
+                    current_price, fcf, dcf_terminal, dcf_wacc, dcf_years, shares
                 )
-
+        
         # Analyst fair value
         analyst_target = metrics.get("target_mean").value if metrics.get("target_mean") else None
         mos_analyst = None
@@ -1729,11 +1517,11 @@ def main():
         """, unsafe_allow_html=True)
     
     with h5:
-        st.markdown(f"""
+                st.markdown(f"""
         <div class="metric-card" style="border: 2px solid {verdict_color};">
-            <div class="metric-label">Sektor</div>
-            <div class="metric-value" style="font-size: 1.2rem;">{sector[:20]}</div>
-            <div class="metric-delta" style="color: {verdict_color}; font-weight: 700;">{verdict}</div>
+            <div class="metric-label">Buy price (MOS ≥ 5%)</div>
+            <div class="metric-value" style="font-size: 1.6rem;">{fmt_money(buy_levels.get("buy")) if buy_levels.get("buy") else "—"}</div>
+            <div class="metric-delta" style="color: {verdict_color}; font-weight: 700;">{("Strong: " + fmt_money(buy_levels.get("strong_buy"))) if buy_levels.get("strong_buy") else "—"}</div>
         </div>
         """, unsafe_allow_html=True)
     
@@ -1750,8 +1538,7 @@ def main():
         "🏢 Peer Comparison",
         "📋 Scorecard Pro",
         "💰 Valuace (DCF)",
-        "📝 Memo & Watchlist",
-        "🐦 Social & Guru"
+        "📝 Memo & Watchlist"
     ])
     
     # ------------------------------------------------------------------------
@@ -1905,7 +1692,8 @@ def main():
                         current_price=current_price,
                         scorecard=scorecard,
                         insider_signal=insider_signal,
-                        macro_events=MACRO_CALENDAR
+                        macro_events=MACRO_CALENDAR,
+                        suggested_buy_price=float(buy_levels.get('buy')) if buy_levels.get('buy') else None,
                     )
                     
                     st.session_state['ai_report'] = ai_report
@@ -2083,19 +1871,6 @@ def main():
     # ------------------------------------------------------------------------
     with tabs[5]:
         st.markdown('<div class="section-header">💰 DCF Valuace & Reverse DCF</div>', unsafe_allow_html=True)
-        
-        # ℹ️ Used DCF parameters (Smart vs Manual)
-        _p = st.session_state.get("used_dcf_params") or {}
-        _src = _p.get("source", "Manual")
-        _g = _p.get("growth", dcf_growth)
-        _w = _p.get("wacc", dcf_wacc)
-        _x = _p.get("exit_multiple", float(dcf_exit_multiple))
-        st.info(f"Použitý Růst: {_g*100:.1f}% ({_src}) | Použitý WACC: {_w*100:.1f}% ({_src}) | Exit Multiple: {_x:.1f}× ({_src})")
-        if _src == "Smart":
-            _beta = safe_float(info.get("beta"))
-            _beta_str = f"{_beta:.2f}" if _beta is not None else "—"
-            st.caption(f"Smart odhad: Beta {_beta_str} • Sektor: {info.get('sector','—')}")
-
         
         if fcf and shares and fcf > 0:
             # Main DCF results
@@ -2325,105 +2100,6 @@ def main():
         else:
             st.info("Watchlist je prázdný")
     
-
-    # ------------------------------------------------------------------------
-    # TAB 8: Social & Guru
-    # ------------------------------------------------------------------------
-    with tabs[7]:
-        st.markdown('<div class="section-header">🐦 Social & Guru</div>', unsafe_allow_html=True)
-
-        # Flatten options
-        options = []
-        option_map = {}
-        for cat, people in GURUS.items():
-            for name, handle in people.items():
-                label = f"{cat} | {name}"
-                options.append(label)
-                option_map[label] = (cat, name, handle)
-
-        left, right = st.columns([1, 2], gap="large")
-
-        with left:
-            st.markdown("### 👤 Výběr Guru")
-            sel = st.selectbox(
-                "Vyber guru účet",
-                options=options,
-                index=0 if options else None,
-                key="guru_selectbox"
-            )
-            cat, name, handle = option_map.get(sel, ("", "", ""))
-            st.markdown(
-                f'<div class="metric-card"><div class="metric-label">Kategorie</div>'
-                f'<div class="metric-value" style="font-size:1.1rem;">{cat or "—"}</div>'
-                f'<div class="metric-delta" style="opacity:0.8;">@{handle}</div></div>',
-                unsafe_allow_html=True
-            )
-            st.caption("Tip: Text tweetu pro AI analýzu vlož ručně níže (bez Twitter API).")
-
-        with right:
-            st.markdown(f"### 🐦 Timeline: {name or '—'}")
-            guru_handle = handle
-            st.markdown("### 📡 Přímý přenos")
-            st.warning("⚠️ X (Twitter) blokuje náhledy v cizích aplikacích. Použij přímý odkaz níže.")
-            st.markdown(f"""
-            <div style="
-                padding: 20px; 
-                border-radius: 12px; 
-                border: 1px solid rgba(255,255,255,0.1); 
-                background: linear-gradient(135deg, rgba(29,161,242,0.1) 0%, rgba(0,0,0,0) 100%);
-                text-align: center;
-            ">
-                <div style="font-size: 50px; margin-bottom: 10px;">🐦</div>
-                <h3>@{guru_handle}</h3>
-                <p>Klikni pro zobrazení nejnovějších analýz a komentářů přímo na X.</p>
-                <a href="https://twitter.com/{guru_handle}" target="_blank" style="text-decoration: none;">
-                    <button style="background-color: #1DA1F2; color: white; border: none; padding: 10px 20px; border-radius: 20px; font-weight: bold; cursor: pointer;">
-                        Otevřít profil @{guru_handle} ↗
-                    </button>
-                </a>
-                <br><br>
-                <div style="text-align: left; font-size: 0.8em; opacity: 0.7;">
-                    <strong>Tip:</strong> Otevři profil, najdi zajímavý tweet, zkopíruj text a vlož ho vlevo do AI analýzy.
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            st.markdown("---")
-            st.markdown(f"#### 🔎 Hledat **${ticker}** na X")
-            st.markdown(f"""
-                <a href="https://twitter.com/search?q=%24{ticker}&src=typed_query&f=top" target="_blank">
-                    <button style="background: transparent; border: 1px solid #1DA1F2; color: #1DA1F2; padding: 5px 15px; border-radius: 15px; cursor: pointer;">
-                        Nejlepší tweety o ${ticker} ↗
-                    </button>
-                </a>
-            """, unsafe_allow_html=True)
-
-            social_text = st.text_area(
-                "Vlož text tweetu nebo komentáře k analýze",
-                height=140,
-                key="social_text_area"
-            )
-
-            analyze_col1, analyze_col2 = st.columns([1, 3])
-            with analyze_col1:
-                do_analyze = st.button("Analyzovat Sentiment", use_container_width=True, key="btn_analyze_social")
-            with analyze_col2:
-                st.caption("Použije Gemini (pokud je nastaven GEMINI_API_KEY).")
-
-            if do_analyze:
-                if not social_text.strip():
-                    st.warning("Vlož prosím text tweetu/komentáře k analýze.")
-                else:
-                    with st.spinner("Analyzuji…"):
-                        result = analyze_social_text_with_gemini(social_text)
-
-                    st.markdown(
-                        '<div class="metric-card"><div class="metric-label">Výstup AI</div></div>',
-                        unsafe_allow_html=True
-                    )
-                    st.markdown(result)
-
-
     # Footer
     st.markdown("---")
     st.caption(f"📊 Data: Yahoo Finance | {APP_NAME} {APP_VERSION} | Toto není investiční doporučení")
