@@ -1319,7 +1319,7 @@ TEXT:
 # -----------------------------------------------------------------------------
 # Smart parameter estimation (Quality Premium)
 # -----------------------------------------------------------------------------
-def def estimate_smart_params(info: Dict[str, Any], metrics: Dict[str, "Metric"]) -> Dict[str, Any]:
+def estimate_smart_params(info: Dict[str, Any], metrics: Dict[str, "Metric"]) -> Dict[str, Any]:
     """
     Konzervativní odhad DCF parametrů.
     Cíl: Zabránit "úletům" u Mega Caps (MSFT, AAPL) a opravit Amazon.
