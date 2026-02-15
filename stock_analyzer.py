@@ -1536,45 +1536,45 @@ def main():
     
 
 
-# Force-close mobile sidebar drawer after clicking Analyze
-if st.session_state.get("close_sidebar_now"):
-    components.html(
-        """
-        <script>
-        (function() {
-          function tryClose() {
-            const candidates = [
-              'button[aria-label="Close sidebar"]',
-              'button[title="Close sidebar"]',
-              'button[data-testid="stSidebarCollapseButton"]',
-              'button[data-testid="stSidebarToggleButton"]',
-              'button[aria-label="Toggle sidebar"]'
-            ];
-            for (const sel of candidates) {
-              const btn = document.querySelector(sel);
-              if (btn) { btn.click(); return true; }
-            }
-            const header = document.querySelector('header');
-            if (header) {
-              const b = header.querySelector('button');
-              if (b) { b.click(); return true; }
-            }
-            return false;
-          }
-          let attempts = 0;
-          const timer = setInterval(() => {
-            attempts++;
-            if (tryClose() || attempts > 12) clearInterval(timer);
-          }, 120);
-        })();
-        </script>
-        """,
-        height=0,
-        width=0,
-    )
-    st.session_state.close_sidebar_now = False
-
-# Welcome screen if no analysis yet
+    # Force-close mobile sidebar drawer after clicking Analyze
+    if st.session_state.get("close_sidebar_now"):
+        components.html(
+            """
+            <script>
+            (function() {
+              function tryClose() {
+                const candidates = [
+                  'button[aria-label="Close sidebar"]',
+                  'button[title="Close sidebar"]',
+                  'button[data-testid="stSidebarCollapseButton"]',
+                  'button[data-testid="stSidebarToggleButton"]',
+                  'button[aria-label="Toggle sidebar"]'
+                ];
+                for (const sel of candidates) {
+                  const btn = document.querySelector(sel);
+                  if (btn) { btn.click(); return true; }
+                }
+                const header = document.querySelector('header');
+                if (header) {
+                  const b = header.querySelector('button');
+                  if (b) { b.click(); return true; }
+                }
+                return false;
+              }
+              let attempts = 0;
+              const timer = setInterval(() => {
+                attempts++;
+                if (tryClose() || attempts > 12) clearInterval(timer);
+              }, 120);
+            })();
+            </script>
+            """,
+            height=0,
+            width=0,
+        )
+        st.session_state.close_sidebar_now = False
+    
+    # Welcome screen if no analysis yet
     if not analyze_btn and "last_ticker" not in st.session_state:
         display_welcome_screen()
         st.stop()
