@@ -24,8 +24,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 import streamlit as st
-
-
+import streamlit.components.v1 as components
 # --- Secrets / API keys (Streamlit Cloud: use Secrets) ---
 def _get_secret(name: str, default: str = "") -> str:
     try:
@@ -56,6 +55,28 @@ APP_VERSION = "v2.0"
 
 GEMINI_MODEL = "gemini-2.0-flash-exp"
 
+
+
+# -----------------------------------------------------------------------------
+# Social & Guru (X/Twitter) handles
+# -----------------------------------------------------------------------------
+GURUS = {
+    "CZ/SK Scéna": {
+        "Jaroslav Brychta": "JaroslavBrychta",
+        "Dominik Stroukal": "stroukal",
+        "Jaroslav Šura": "jarsura",
+        "Tomáš Plecháč": "TPlechac",
+        "Akciový Guru": "akciovyguru",
+        "Nicnevim": "Nicnevim11",
+        "Bulios": "Bulios_cz",
+        "Michal Semotan": "MichalSemotan",
+    },
+    "Global & News": {
+        "Walter Bloomberg (News)": "DeItaone",
+        "Brian Feroldi (Education)": "BrianFeroldi",
+        "App Economy Insights": "AppEconomyInsights",
+    },
+}
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), ".stock_picker_pro")
 WATCHLIST_PATH = os.path.join(DATA_DIR, "watchlist.json")
@@ -218,112 +239,6 @@ def fetch_financials(ticker: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFr
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 
-
-
-@st.cache_data(show_spinner=False, ttl=3600)
-def get_fcf_ttm_yfinance(ticker: str, market_cap: Optional[float] = None) -> Tuple[Optional[float], List[str]]:
-    """
-    ULTRA-ROBUSTNÍ výpočet FCF (TTM).
-    Opravuje chybu 'polovičního cashflow' pomocí kontroly FCF Yield.
-    """
-    dbg: List[str] = []
-    
-    # Pomocná funkce pro bezpečný převod
-    def to_float(val):
-        try: return float(val)
-        except: return 0.0
-
-    try:
-        t = yf.Ticker(ticker)
-        
-        # 1. Zkusíme quarterly cashflow
-        try:
-            qcf = t.quarterly_cashflow
-        except:
-            qcf = None
-            
-        fcf_vals = []
-        
-        if qcf is not None and not qcf.empty:
-            # Hledáme řádek Free Cash Flow
-            fcf_row = None
-            if "Free Cash Flow" in qcf.index:
-                fcf_row = qcf.loc["Free Cash Flow"]
-            elif "FreeCashFlow" in qcf.index:
-                fcf_row = qcf.loc["FreeCashFlow"]
-            
-            # Pokud chybí, zkusíme OCF - CapEx
-            if fcf_row is None:
-                ocf = None
-                capex = None
-                
-                # Najdi OCF
-                for k in ["Total Cash From Operating Activities", "Operating Cash Flow"]:
-                    if k in qcf.index:
-                        ocf = qcf.loc[k]
-                        break
-                # Najdi CapEx
-                for k in ["Capital Expenditures", "CapitalExpenditures", "Capex"]:
-                    if k in qcf.index:
-                        capex = qcf.loc[k]
-                        break
-                        
-                if ocf is not None and capex is not None:
-                    # OCF - abs(Capex)
-                    fcf_vals = []
-                    for i in range(len(ocf)):
-                        try:
-                            val = to_float(ocf.iloc[i]) - abs(to_float(capex.iloc[i]))
-                            fcf_vals.append(val)
-                        except: pass
-                    dbg.append("Zdroj: Quarterly OCF - CapEx")
-            
-            elif fcf_row is not None:
-                fcf_vals = [to_float(x) for x in fcf_row]
-                dbg.append("Zdroj: Quarterly Free Cash Flow")
-
-        # 2. VÝPOČET A KONTROLA (CRITICAL FIX)
-        final_fcf = 0.0
-        
-        # Vezmeme max 4 nejnovější hodnoty
-        valid_vals = [v for v in fcf_vals if v != 0][:4]
-        
-        if len(valid_vals) > 0:
-            avg_q_fcf = sum(valid_vals) / len(valid_vals)
-            sum_fcf = sum(valid_vals)
-            
-            # --- DETEKTIVKA: Máme dost dat? ---
-            projected_annual = avg_q_fcf * 4
-            
-            # Pokud máme méně než 4 kvartály, rovnou extrapolujeme
-            if len(valid_vals) < 4:
-                final_fcf = projected_annual
-                dbg.append(f"⚠️ Nalezeny jen {len(valid_vals)} kvartály. Extrapoluji (Avg * 4).")
-            else:
-                final_fcf = sum_fcf
-            
-            # --- SANITY CHECK (Pojistka pro MSFT) ---
-            if market_cap and market_cap > 1e9: 
-                implied_yield = final_fcf / market_cap
-                # Pokud je yield podezřele malý (< 2%) a extrapolace dává víc smysl, použijeme ji.
-                if implied_yield < 0.02 and (projected_annual / market_cap) > 0.025:
-                     final_fcf = projected_annual
-                     dbg.append(f"🛡️ SANITY CHECK: FCF Yield příliš nízký ({implied_yield:.1%}). Vynucena extrapolace na {final_fcf/1e9:.2f}B.")
-
-        else:
-            # Fallback na info
-            final_fcf = to_float(t.info.get("freeCashflow", 0))
-            dbg.append("Fallback: info['freeCashflow']")
-
-        # Final check
-        if final_fcf == 0:
-             final_fcf = to_float(t.info.get("freeCashflow", 0))
-
-        return final_fcf, dbg
-
-    except Exception as e:
-        return None, [str(e)]
-
 @st.cache_data(show_spinner=False, ttl=3600)
 def get_all_time_high(ticker: str) -> Optional[float]:
     """Get all-time high price."""
@@ -399,7 +314,7 @@ def extract_metrics(info: Dict[str, Any], ticker: str) -> Dict[str, Metric]:
     total_debt = safe_float(info.get("totalDebt"))
     
     # Cash flow
-    fcf, _fcf_dbg = get_fcf_ttm_yfinance(ticker, market_cap=safe_float(info.get("marketCap")))
+    fcf = safe_float(info.get("freeCashflow"))
     operating_cashflow = safe_float(info.get("operatingCashflow"))
     market_cap = safe_float(info.get("marketCap"))
     fcf_yield = safe_div(fcf, market_cap) if fcf and market_cap else None
@@ -776,7 +691,7 @@ def fetch_peer_comparison(ticker: str, peers: List[str]) -> pd.DataFrame:
                 "P/E": safe_float(info.get("trailingPE")),
                 "Op. Margin": safe_float(info.get("operatingMargins")),
                 "Rev. Growth": safe_float(info.get("revenueGrowth")),
-                "FCF Yield": safe_div(get_fcf_ttm_yfinance(t, market_cap=safe_float(info.get("marketCap")))[0], safe_float(info.get("marketCap"))),
+                "FCF Yield": safe_div(safe_float(info.get("freeCashflow")), safe_float(info.get("marketCap"))),
                 "Market Cap": safe_float(info.get("marketCap")),
             })
         except Exception:
@@ -1085,6 +1000,69 @@ def get_advanced_verdict(
 # MAIN APPLICATION
 # ============================================================================
 
+
+def render_twitter_timeline(handle: str, height: int = 600) -> None:
+    """Render X/Twitter timeline embed without API keys."""
+    handle = (handle or "").lstrip("@").strip()
+    if not handle:
+        st.info("Vyber guru účet.")
+        return
+
+    html = f"""
+    <div style="width:100%; height:{height}px; overflow:hidden;">
+      <a class="twitter-timeline"
+         data-theme="dark"
+         data-dnt="true"
+         data-height="{height}"
+         href="https://twitter.com/{handle}?ref_src=twsrc%5Etfw">
+        Tweets by @{handle}
+      </a>
+    </div>
+    <script async src="https://platform.twitter.com/widgets.js" charset="utf-8"></script>
+    """
+    # Give the component a bit more room than the widget height
+    components.html(html, height=height + 50)
+
+def analyze_social_text_with_gemini(text: str) -> str:
+    """Analyze manually pasted tweet/comment using Gemini."""
+    text = (text or "").strip()
+    if not text:
+        return "Chybí text k analýze."
+
+    if not GEMINI_API_KEY:
+        return "AI analýza není dostupná (chybí GEMINI_API_KEY)."
+
+    prompt = f"""Jako seniorní investor analyzuj tento text z sociálních sítí týkající se financí.
+
+1) Jaký je sentiment (Bullish/Bearish/Neutral)?
+2) Jsou tam nějaká fakta nebo jen šum?
+3) Verdikt pro investora.
+
+TEXT:
+{text}
+"""
+
+    try:
+        # Try new google-genai SDK first
+        try:
+            from google import genai
+            client = genai.Client(api_key=GEMINI_API_KEY)
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=prompt
+            )
+            return (response.text or "").strip()
+        except ImportError:
+            # Fallback to old SDK
+            import google.generativeai as genai
+            genai.configure(api_key=GEMINI_API_KEY)
+            model = genai.GenerativeModel(GEMINI_MODEL)
+            response = model.generate_content(prompt)
+            return (getattr(response, "text", "") or "").strip()
+    except Exception as e:
+        return f"Chyba při volání Gemini: {e}"
+
+
 def main():
     """Main application entry point."""
     
@@ -1284,40 +1262,21 @@ def main():
         insider_df = fetch_insider_transactions(ticker)
         insider_signal = compute_insider_pro_signal(insider_df)
         
-# DCF calculations (OPRAVENO: FCF + Net Cash)
-        fcf, fcf_dbg = get_fcf_ttm_yfinance(ticker, market_cap=safe_float(info.get("marketCap")))
-        # Debug výpis do konzole (pro kontrolu)
-        if fcf_dbg:
-            print(f"--- DCF DEBUG PRO {ticker} ---")
-            for _l in fcf_dbg: print(_l)
-            print(f"Final FCF: ${fcf/1e9 if fcf else 0:.2f} B")
-
+        # DCF calculations
+        fcf = safe_float(info.get("freeCashflow"))
         shares = safe_float(info.get("sharesOutstanding"))
         current_price = metrics.get("price").value if metrics.get("price") else None
-        
-        # Nově načítáme hotovost a dluh
-        total_cash = safe_float(info.get("totalCash")) or 0
-        total_debt = safe_float(info.get("totalDebt")) or 0
         
         fair_value_dcf = None
         mos_dcf = None
         implied_growth = None
         
         if fcf and shares and fcf > 0:
-            # 1. Hodnota byznysu z budoucích toků
-            enterprise_value_dcf = calculate_dcf_fair_value(
-                fcf, dcf_growth, dcf_terminal, dcf_wacc, dcf_years, 1 # Zde 1, abychom dostali celkovou EV, ne per share
+            fair_value_dcf = calculate_dcf_fair_value(
+                fcf, dcf_growth, dcf_terminal, dcf_wacc, dcf_years, shares
             )
-            
-            if enterprise_value_dcf:
-                # 2. Úprava o čistý dluh/hotovost (Equity Value)
-                equity_value = enterprise_value_dcf + total_cash - total_debt
-                fair_value_dcf = equity_value / shares
-            
-            # Výpočet MOS a Implied Growth
             if fair_value_dcf and current_price:
                 mos_dcf = (fair_value_dcf / current_price) - 1.0
-                # Reverse DCF se počítá čistě z FCF (zjednodušeně)
                 implied_growth = reverse_dcf_implied_growth(
                     current_price, fcf, dcf_terminal, dcf_wacc, dcf_years, shares
                 )
@@ -1416,7 +1375,8 @@ def main():
         "🏢 Peer Comparison",
         "📋 Scorecard Pro",
         "💰 Valuace (DCF)",
-        "📝 Memo & Watchlist"
+        "📝 Memo & Watchlist",
+        "🐦 Social & Guru"
     ])
     
     # ------------------------------------------------------------------------
@@ -1977,6 +1937,72 @@ def main():
         else:
             st.info("Watchlist je prázdný")
     
+
+    # ------------------------------------------------------------------------
+    # TAB 8: Social & Guru
+    # ------------------------------------------------------------------------
+    with tabs[7]:
+        st.markdown('<div class="section-header">🐦 Social & Guru</div>', unsafe_allow_html=True)
+
+        # Flatten options
+        options = []
+        option_map = {}
+        for cat, people in GURUS.items():
+            for name, handle in people.items():
+                label = f"{cat} | {name}"
+                options.append(label)
+                option_map[label] = (cat, name, handle)
+
+        left, right = st.columns([1, 2], gap="large")
+
+        with left:
+            st.markdown("### 👤 Výběr Guru")
+            sel = st.selectbox(
+                "Vyber guru účet",
+                options=options,
+                index=0 if options else None,
+                key="guru_selectbox"
+            )
+            cat, name, handle = option_map.get(sel, ("", "", ""))
+            st.markdown(
+                f'<div class="metric-card"><div class="metric-label">Kategorie</div>'
+                f'<div class="metric-value" style="font-size:1.1rem;">{cat or "—"}</div>'
+                f'<div class="metric-delta" style="opacity:0.8;">@{handle}</div></div>',
+                unsafe_allow_html=True
+            )
+            st.caption("Tip: Text tweetu pro AI analýzu vlož ručně níže (bez Twitter API).")
+
+        with right:
+            st.markdown(f"### 🐦 Timeline: {name or '—'}")
+            render_twitter_timeline(handle, height=600)
+
+            st.markdown("### 🧠 AI Analýza Tweetu")
+            social_text = st.text_area(
+                "Vlož text tweetu nebo komentáře k analýze",
+                height=140,
+                key="social_text_area"
+            )
+
+            analyze_col1, analyze_col2 = st.columns([1, 3])
+            with analyze_col1:
+                do_analyze = st.button("Analyzovat Sentiment", use_container_width=True, key="btn_analyze_social")
+            with analyze_col2:
+                st.caption("Použije Gemini (pokud je nastaven GEMINI_API_KEY).")
+
+            if do_analyze:
+                if not social_text.strip():
+                    st.warning("Vlož prosím text tweetu/komentáře k analýze.")
+                else:
+                    with st.spinner("Analyzuji…"):
+                        result = analyze_social_text_with_gemini(social_text)
+
+                    st.markdown(
+                        '<div class="metric-card"><div class="metric-label">Výstup AI</div></div>',
+                        unsafe_allow_html=True
+                    )
+                    st.markdown(result)
+
+
     # Footer
     st.markdown("---")
     st.caption(f"📊 Data: Yahoo Finance | {APP_NAME} {APP_VERSION} | Toto není investiční doporučení")
