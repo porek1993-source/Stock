@@ -35,6 +35,17 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+
+# --- Layout fix (full width on desktop) ---
+st.markdown(
+    """
+    <style>
+      .block-container { max-width: 100% !important; padding-left: 1.2rem; padding-right: 1.2rem; }
+      @media (max-width: 768px) { .block-container { padding-left: 0.8rem; padding-right: 0.8rem; } }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 # Use full width on desktop (avoid centered/narrow container)
 st.markdown(
     """
@@ -150,7 +161,7 @@ except Exception:
 APP_NAME = "Stock Picker Pro"
 APP_VERSION = "v2.0"
 
-GEMINI_MODEL = "gemini-2.5-flash-lite"
+GEMINI_MODEL = "gemini-2.0-flash-exp"
 
 
 
@@ -1437,6 +1448,24 @@ def main():
     if "close_sidebar_js" not in st.session_state:
         st.session_state.close_sidebar_js = False
 
+    # Optional: hide sidebar overlay on mobile after analyze (keeps results visible)
+    if st.session_state.get("sidebar_hidden"):
+        st.markdown("""
+        <style>
+        @media (max-width: 900px) {
+          section[data-testid="stSidebar"], [data-testid="stSidebar"] {
+            transform: translateX(-120%) !important;
+            opacity: 0 !important;
+            pointer-events: none !important;
+          }
+        }
+        </style>
+        """, unsafe_allow_html=True)
+
+    if "sidebar_hidden" not in st.session_state:
+        st.session_state.sidebar_hidden = False
+
+
     # If requested (e.g., after clicking Analyze), inject JS in MAIN area to force-close the sidebar on mobile.
     if st.session_state.get("close_sidebar_js"):
         components.html(js_close_sidebar(), height=0, width=0)
@@ -1546,24 +1575,65 @@ def main():
         st.caption("v2.0 - Advanced Quant Analysis")
         st.markdown("---")
         
-        # Ticker input
-        ticker_input = st.text_input(
-            "Ticker Symbol",
-            value="AAPL",
-            help="Zadej ticker (např. AAPL, MSFT, GOOGL)",
-            max_chars=10
-        ).upper().strip()
-        
-        analyze_btn = st.button("🔍 Analyzovat", type="primary", use_container_width=True)
+        # Ticker input (Form -> Enter submits)
 
-        if analyze_btn:
-            # Request sidebar close (mobile drawer) and rerun into RESULTS mode.
-            st.session_state.close_sidebar_js = True
-            st.session_state.ui_mode = "RESULTS"
-            st.session_state.selected_ticker = ticker_input
-            st.session_state["last_ticker"] = ticker_input
-            st.rerun()
         
+        with st.form("analyze_form", clear_on_submit=False):
+
+        
+            default_ticker = st.session_state.get("selected_ticker") or st.session_state.get("last_ticker") or "AAPL"
+
+        
+            _raw_ticker = st.text_input(
+
+        
+                "Ticker Symbol",
+
+        
+                value=str(default_ticker),
+
+        
+                help="Zadej ticker (např. AAPL, MSFT, GOOGL) a potvrď Enterem",
+
+        
+                max_chars=10,
+
+        
+                key="ticker_input",
+
+        
+            )
+
+        
+            ticker_input = (_raw_ticker or "").upper().strip()
+
+        
+            analyze_btn = st.form_submit_button("🔍 Analyzovat", type="primary", use_container_width=True)
+
+        
+        
+
+        
+        if analyze_btn:
+
+        
+            # Request sidebar close (mobile drawer) and rerun into RESULTS mode.
+
+        
+            st.session_state.close_sidebar_js = True
+
+        
+            st.session_state.sidebar_hidden = True
+            st.session_state.ui_mode = "RESULTS"
+
+        
+            st.session_state.selected_ticker = ticker_input
+
+        
+            st.session_state["last_ticker"] = ticker_input
+
+        
+            st.rerun()
         st.markdown("---")
         
         # DCF Settings
@@ -1631,8 +1701,16 @@ def main():
     
         # Pokud jsme ve výsledcích, nabídni rychlý návrat na výběr (hlavně pro mobil)
     if st.session_state.get("ui_mode") == "RESULTS":
+        colA, colB = st.columns([1, 2])
+        with colA:
+            if st.button("☰ Menu", use_container_width=True):
+                st.session_state.sidebar_hidden = False
+                st.rerun()
+        with colB:
+            st.empty()
         if st.button("⬅️ Zpět na výběr", use_container_width=True):
             st.session_state.ui_mode = "PICKER"
+            st.session_state.sidebar_hidden = False
             st.session_state.selected_ticker = ""
             st.session_state.pop("last_ticker", None)
             st.rerun()
