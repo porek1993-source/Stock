@@ -172,34 +172,77 @@ def get_fcf_ttm_yfinance(t: "yf.Ticker", info: Dict[str, Any], *, debug: bool = 
                 continue
         return None
 
-    def _sum_last4(df: pd.DataFrame, row_candidates: List[str]) -> Optional[float]:
-        try:
-            cols = list(df.columns)
-            if not cols:
-                return None
-            cols_sorted = sorted(cols, reverse=True)
-            cols_last4 = cols_sorted[:4]
+def _sum_last4(df: pd.DataFrame, row_candidates: List[str]) -> Optional[float]:
+    """Sum the latest 4 quarterly values for the given row candidates.
 
-            # exact / loose row match
-            idx_lower = [str(i).lower() for i in df.index]
-
-            for rn in row_candidates:
-                if rn in df.index:
-                    vals = [safe_float(df.loc[rn, c]) for c in cols_last4]
-                    vals = [v for v in vals if v is not None]
-                    if len(vals) >= 3:
-                        return float(sum(vals))
-
-                key = rn.lower()
-                for i, raw in enumerate(idx_lower):
-                    if key == raw or key in raw:
-                        vals = [safe_float(df.iloc[i][c]) for c in cols_last4]
-                        vals = [v for v in vals if v is not None]
-                        if len(vals) >= 3:
-                            return float(sum(vals))
-        except Exception:
+    Important: yfinance sometimes returns quarterly columns ordered oldest->newest.
+    We therefore sort columns by parsed date DESC and take the newest 4.
+    """
+    try:
+        cols = list(df.columns)
+        if not cols:
             return None
+
+        # Robust column date sort (Timestamp / datetime / string)
+        dated_cols = []
+        for c in cols:
+            try:
+                d = pd.to_datetime(c, errors="coerce")
+            except Exception:
+                d = pd.NaT
+            dated_cols.append((d, c))
+
+        # Sort newest first; NaT last
+        dated_cols.sort(key=lambda x: (pd.isna(x[0]), x[0]), reverse=False)
+        # After sort: NaT first if reverse False; so we do custom:
+        dated_cols = sorted(dated_cols, key=lambda x: (pd.isna(x[0]), x[0] if not pd.isna(x[0]) else pd.Timestamp.min), reverse=True)
+
+        cols_last4 = [c for _, c in dated_cols[:4]]
+
+        # exact / loose row match
+        idx_lower = [str(i).lower() for i in df.index]
+
+        def _vals_for_row(row_idx: int, row_label: str) -> Optional[float]:
+            vals = [safe_float(df.loc[row_label, c]) for c in cols_last4] if row_label in df.index else [safe_float(df.iloc[row_idx][c]) for c in cols_last4]
+            vals = [v for v in vals if v is not None]
+            if len(vals) >= 3:
+                return float(sum(vals))
+            return None
+
+        for rn in row_candidates:
+            if rn in df.index:
+                out = _vals_for_row(0, rn)
+                if out is not None:
+                    if debug:
+                        try:
+                            parts = []
+                            for c in cols_last4:
+                                parts.append(f"{str(c)[:10]}={safe_float(df.loc[rn, c])}")
+                            print("TTM quarters used:", ", ".join(parts))
+                        except Exception:
+                            pass
+                    return out
+
+            key = rn.lower()
+            for i, raw in enumerate(idx_lower):
+                if key == raw or key in raw:
+                    # use i as row index
+                    # Need actual label for .loc if possible
+                    label = df.index[i]
+                    out = _vals_for_row(i, label)
+                    if out is not None:
+                        if debug:
+                            try:
+                                parts = []
+                                for c in cols_last4:
+                                    parts.append(f"{str(c)[:10]}={safe_float(df.iloc[i][c])}")
+                                print("TTM quarters used:", ", ".join(parts))
+                            except Exception:
+                                pass
+                        return out
+    except Exception:
         return None
+    return None
 
     qcf = _df_get(t, ["quarterly_cashflow", "quarterly_cashflow_stmt", "quarterly_cashflow_statement"])
     if qcf is not None:
