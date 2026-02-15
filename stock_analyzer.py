@@ -1031,9 +1031,41 @@ def get_advanced_verdict(
 # MAIN APPLICATION
 # ============================================================================
 
+
+def _on_analyze_click():
+    # Called before the script reruns after clicking Analyze.
+    st.session_state["show_sidebar"] = False
+    st.session_state["_analyze_requested"] = True
+
+
+
+
 def main():
     """Main application entry point."""
     
+
+# ---- Sidebar visibility (mobile) ----
+if "show_sidebar" not in st.session_state:
+    st.session_state["show_sidebar"] = True
+
+# Apply sidebar CSS early (before rendering sidebar widgets) so it takes effect on the same rerun
+if not st.session_state.get("show_sidebar", True):
+    st.markdown(
+        """
+        <style>
+          /* Hide sidebar completely */
+          section[data-testid="stSidebar"] { display: none !important; }
+          /* Ex
+    analyze_requested = bool(st.session_state.get("_analyze_requested", False))
+    if analyze_requested:
+        # clear the flag immediately to avoid repeated reruns
+        st.session_state["_analyze_requested"] = False
+pand main content when sidebar hidden */
+          div[data-testid="stAppViewContainer"] { margin-left: 0 !important; }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
     # Page configuration - WIDE LAYOUT
     st.set_page_config(
         page_title="Stock Picker Pro v2.0",
