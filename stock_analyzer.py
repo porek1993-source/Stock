@@ -138,33 +138,49 @@ def js_open_tab(tab_label: str) -> str:
     """Return HTML+JS that selects a Streamlit tab by matching its visible label (best-effort)."""
     safe_label = (tab_label or "").strip()
     target_js = json.dumps(safe_label)  # safe JS string literal
+
+    # NOTE: Streamlit's tab DOM changes across versions. We use multiple selectors and retry.
     return (
         "<script>\n"
         "(function(){\n"
         "  const target = " + target_js + ";\n"
         "  if (!target) return;\n"
-        "  function norm(s){return (s||'').replace(/\\s+/g,' ').trim();}\n"
-        "  function stripEmoji(s){return norm(s).replace(/[\\u{1F300}-\\u{1FAFF}]/gu,'').trim();}\n"
+        "  const norm = (s)=>String(s||'').replace(/\\s+/g,' ').trim();\n"
+        "  const stripEmoji = (s)=>norm(s).replace(/[\\u{1F000}-\\u{1FAFF}]/gu,'').trim();\n"
+        "  function uniq(arr){ return Array.from(new Set(arr)); }\n"
         "  function findAndClick(){\n"
         "    const doc = window.parent.document;\n"
-        "    const buttons = Array.from(doc.querySelectorAll('button[role=\"tab\"], [data-baseweb=\"tab\"] button, [data-testid=\"stTabs\"] button'));\n"
-        "    if (!buttons.length) return false;\n"
+        "    const selectors = [\n"
+        "      'button[role=\\"tab\\"]',\n"
+        "      '[role=\\"tab\\"]',\n"
+        "      'div[role=\\"tablist\\"] button',\n"
+        "      '[data-baseweb=\\"tab\\"] button',\n"
+        "      '[data-testid=\\"stTabs\\"] button',\n"
+        "      '[data-testid=\\"stTabs\\"] [role=\\"tab\\"]'\n"
+        "    ];\n"
+        "    let nodes = [];\n"
+        "    for (const sel of selectors){ nodes = nodes.concat(Array.from(doc.querySelectorAll(sel))); }\n"
+        "    nodes = uniq(nodes);\n"
+        "    if (!nodes.length) return false;\n"
         "    const wanted = norm(target);\n"
-        "    for (const b of buttons){\n"
-        "      const t = norm(b.innerText);\n"
-        "      if (t && (t.includes(wanted) || wanted.includes(t))){ b.click(); return true; }\n"
+        "    for (const el of nodes){\n"
+        "      const t = norm(el.innerText || el.textContent);\n"
+        "      if (t && t.includes(wanted)) { el.click(); return true; }\n"
         "    }\n"
         "    const wanted2 = stripEmoji(target);\n"
         "    if (wanted2){\n"
-        "      for (const b of buttons){\n"
-        "        const t2 = stripEmoji(b.innerText);\n"
-        "        if (t2 && (t2.includes(wanted2) || wanted2.includes(t2))){ b.click(); return true; }\n"
+        "      for (const el of nodes){\n"
+        "        const t2 = stripEmoji(el.innerText || el.textContent);\n"
+        "        if (t2 && t2.includes(wanted2)) { el.click(); return true; }\n"
         "      }\n"
         "    }\n"
         "    return false;\n"
         "  }\n"
-        "  let tries=0;\n"
-        "  const timer=setInterval(()=>{ tries++; if (findAndClick() || tries>25) clearInterval(timer); }, 120);\n"
+        "  let tries = 0;\n"
+        "  const timer = setInterval(()=>{\n"
+        "    tries++;\n"
+        "    if (findAndClick() || tries > 80) clearInterval(timer);\n"
+        "  }, 120);\n"
         "})();\n"
         "</script>\n"
     )
@@ -197,7 +213,7 @@ except Exception:
 APP_NAME = "Stock Picker Pro"
 APP_VERSION = "v2.0"
 
-GEMINI_MODEL = "gemini-2.0-flash-exp"
+GEMINI_MODEL = "gemini-2.5-flash-lite"
 
 
 
@@ -1506,7 +1522,7 @@ def main():
         st.session_state.selected_ticker = ""
 
     if "force_tab_label" not in st.session_state:
-        st.session_state.active_tab_label = None
+        st.session_state.force_tab_label = None
 
     if "close_sidebar_js" not in st.session_state:
         st.session_state.close_sidebar_js = False
@@ -1983,7 +1999,7 @@ def main():
     # TABS
     # ========================================================================
     
-    tab_labels = [
+    tabs = st.tabs([
         "📊 Overview",
         "🗓️ Market Watch",
         "🤖 AI Analyst",
@@ -1991,21 +2007,18 @@ def main():
         "📋 Scorecard Pro",
         "💰 Valuace (DCF)",
         "📝 Memo & Watchlist",
-        "🐦 Social & Guru",
-    ]
+        "🐦 Social & Guru"
+    ])
 
-    # Persistent tab selection that survives reruns (Enter / buttons) without JS hacks
-    active_tab = st.radio(
-        "",
-        tab_labels,
-        horizontal=True,
-        key="active_tab_label",
-        label_visibility="collapsed",
-    )
+    # Keep user on the same tab after reruns triggered by button clicks
+    if st.session_state.get("force_tab_label"):
+        components.html(js_open_tab(st.session_state.force_tab_label), height=0, width=0)
+        st.session_state.force_tab_label = None
+    
     # ------------------------------------------------------------------------
     # TAB 1: Overview
     # ------------------------------------------------------------------------
-    if active_tab == "📊 Overview":
+    with tabs[0]:
         st.markdown('<div class="section-header">📊 Rychlý přehled</div>', unsafe_allow_html=True)
         
         # Two columns
@@ -2077,7 +2090,7 @@ def main():
     # ------------------------------------------------------------------------
     # TAB 2: Market Watch (Makro & Earnings Calendar)
     # ------------------------------------------------------------------------
-    elif active_tab == "🗓️ Market Watch":
+    with tabs[1]:
         st.markdown('<div class="section-header">🗓️ Market Watch - Upcoming Events</div>', unsafe_allow_html=True)
         
         st.markdown("### 🌍 Makroekonomické události (příští 2 měsíce)")
@@ -2133,7 +2146,7 @@ def main():
     # ------------------------------------------------------------------------
     # TAB 3: AI Analyst Report
     # ------------------------------------------------------------------------
-    elif active_tab == "🤖 AI Analyst":
+    with tabs[2]:
         st.markdown('<div class="section-header">🤖 AI Analytik - Hloubkový Report</div>', unsafe_allow_html=True)
         
         if not GEMINI_API_KEY:
@@ -2143,7 +2156,7 @@ def main():
             st.info("🤖 Gemini AI je připraven vygenerovat hloubkovou analýzu")
             
             if st.button("🚀 Vygenerovat AI Report", use_container_width=True, type="primary"):
-                st.session_state.active_tab_label = "AI Analyst"
+                st.session_state.force_tab_label = "🤖 AI Analyst"
                 with st.spinner("🧠 AI analytik přemýšlí... (může trvat 10-20s)"):
                     ai_report = generate_ai_analyst_report(
                         ticker=ticker,
@@ -2206,7 +2219,7 @@ def main():
     # ------------------------------------------------------------------------
     # TAB 4: Peer Comparison
     # ------------------------------------------------------------------------
-    elif active_tab == "🏢 Peer Comparison":
+    with tabs[3]:
         st.markdown('<div class="section-header">🏢 Srovnání s konkurencí</div>', unsafe_allow_html=True)
         
         if not auto_peers:
@@ -2272,7 +2285,7 @@ def main():
     # ------------------------------------------------------------------------
     # TAB 5: Scorecard Pro
     # ------------------------------------------------------------------------
-    elif active_tab == "📋 Scorecard Pro":
+    with tabs[4]:
         st.markdown('<div class="section-header">📋 Investiční Scorecard Pro</div>', unsafe_allow_html=True)
         
         # Overall score
@@ -2332,7 +2345,7 @@ def main():
     # ------------------------------------------------------------------------
     # TAB 6: DCF Valuation
     # ------------------------------------------------------------------------
-    elif active_tab == "💰 Valuace (DCF)":
+    with tabs[5]:
         st.markdown('<div class="section-header">💰 DCF Valuace & Reverse DCF</div>', unsafe_allow_html=True)
         
         st.info(f"Použitý Růst: {used_dcf_growth*100:.1f} % ({used_mode_label}) | Použitý WACC: {used_dcf_wacc*100:.1f} % ({used_mode_label}) | Exit Multiple: {used_exit_multiple:.1f}× ({used_mode_label})")
@@ -2410,7 +2423,7 @@ def main():
     # ------------------------------------------------------------------------
     # TAB 7: Memo & Watchlist
     # ------------------------------------------------------------------------
-    elif active_tab == "📝 Memo & Watchlist":
+    with tabs[6]:
         st.markdown('<div class="section-header">📝 Investment Memo & Watchlist</div>', unsafe_allow_html=True)
         
         # Load existing
@@ -2569,7 +2582,7 @@ def main():
     # ------------------------------------------------------------------------
     # TAB 8: Social & Guru
     # ------------------------------------------------------------------------
-    elif active_tab == "🐦 Social & Guru":
+    with tabs[7]:
         st.markdown('<div class="section-header">🐦 Social & Guru</div>', unsafe_allow_html=True)
 
         # Flatten options
@@ -2648,7 +2661,7 @@ def main():
             with analyze_col1:
                 do_analyze = st.button("Analyzovat Sentiment", use_container_width=True, key="btn_analyze_social")
                 if do_analyze:
-                    st.session_state.active_tab_label = "Social & Guru"
+                    st.session_state.force_tab_label = "🐦 Social & Guru"
             with analyze_col2:
                 st.caption("Použije Gemini (pokud je nastaven GEMINI_API_KEY).")
 
