@@ -207,7 +207,7 @@ except Exception:
 APP_NAME = "Stock Picker Pro"
 APP_VERSION = "v2.0"
 
-GEMINI_MODEL = "gemini-2.5-flash-lite"
+GEMINI_MODEL = "gemini-2.0-flash-exp"
 
 
 
@@ -311,6 +311,29 @@ def safe_float(x: Any) -> Optional[float]:
             v = float(x)
             if math.isfinite(v):
                 return v
+        return None
+    except Exception:
+        return None
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def get_all_time_high(ticker: str) -> Optional[float]:
+    """Return all-time high price (max Close) from available historical data.
+
+    Used for quick context in the UI. Returns None if data is unavailable.
+    """
+    try:
+        t = yf.Ticker(ticker)
+        hist = t.history(period="max")
+        if hist is None or hist.empty:
+            return None
+        if "Close" in hist.columns:
+            return float(pd.to_numeric(hist["Close"], errors="coerce").dropna().max())
+        # fallback: first numeric column
+        for col in hist.columns:
+            s = pd.to_numeric(hist[col], errors="coerce").dropna()
+            if not s.empty:
+                return float(s.max())
         return None
     except Exception:
         return None
