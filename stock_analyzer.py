@@ -199,7 +199,7 @@ except Exception:
 APP_NAME = "Stock Picker Pro"
 APP_VERSION = "v2.0"
 
-GEMINI_MODEL = "gemini-2.5-flash-lite"
+GEMINI_MODEL = "gemini-2.5-flash-lite
 
 
 
@@ -1814,7 +1814,7 @@ def main():
             st.session_state.pop("last_ticker", None)
             st.rerun()
 
-# Process ticker
+    # Process ticker
     ticker = (st.session_state.get("selected_ticker") or ticker_input) if analyze_btn else st.session_state.get("last_ticker", "AAPL")
     st.session_state["last_ticker"] = ticker
     
@@ -2012,10 +2012,10 @@ def main():
         "🐦 Social & Guru"
     ])
 
-# Keep user on the tab they clicked (Streamlit rerun otherwise jumps to first tab)
-if "force_tab_label" in st.session_state and st.session_state.force_tab_label:
-    components.html(js_open_tab(st.session_state.force_tab_label), height=0, width=0)
-    st.session_state.force_tab_label = None
+    # Keep user on the tab they clicked (Streamlit rerun otherwise jumps to first tab)
+    if "force_tab_label" in st.session_state and st.session_state.force_tab_label:
+        components.html(js_open_tab(st.session_state.force_tab_label), height=0, width=0)
+        st.session_state.force_tab_label = None
 
     
     # ------------------------------------------------------------------------
