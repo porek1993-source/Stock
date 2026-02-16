@@ -136,54 +136,70 @@ def js_close_sidebar():
 
 def js_open_tab(tab_label: str) -> str:
     """Return HTML+JS that selects a Streamlit tab by matching its visible label (best-effort)."""
-    safe_label = (tab_label or "").strip()
-    target_js = json.dumps(safe_label)  # safe JS string literal
+    label = (tab_label or "").strip()
+    target_js = json.dumps(label)  # safe JS string literal
 
-    # NOTE: Streamlit's tab DOM changes across versions. We use multiple selectors and retry.
-    return (
-        "<script>\n"
-        "(function(){\n"
-        "  const target = " + target_js + ";\n"
-        "  if (!target) return;\n"
-        "  const norm = (s)=>String(s||'').replace(/\\s+/g,' ').trim();\n"
-        "  const stripEmoji = (s)=>norm(s).replace(/[\\u{1F000}-\\u{1FAFF}]/gu,'').trim();\n"
-        "  function uniq(arr){ return Array.from(new Set(arr)); }\n"
-        "  function findAndClick(){\n"
-        "    const doc = window.parent.document;\n"
-        "    const selectors = [\n"
-        "      'button[role=\\"tab\\"]',\n"
-        "      '[role=\\"tab\\"]',\n"
-        "      'div[role=\\"tablist\\"] button',\n"
-        "      '[data-baseweb=\\"tab\\"] button',\n"
-        "      '[data-testid=\\"stTabs\\"] button',\n"
-        "      '[data-testid=\\"stTabs\\"] [role=\\"tab\\"]'\n"
-        "    ];\n"
-        "    let nodes = [];\n"
-        "    for (const sel of selectors){ nodes = nodes.concat(Array.from(doc.querySelectorAll(sel))); }\n"
-        "    nodes = uniq(nodes);\n"
-        "    if (!nodes.length) return false;\n"
-        "    const wanted = norm(target);\n"
-        "    for (const el of nodes){\n"
-        "      const t = norm(el.innerText || el.textContent);\n"
-        "      if (t && t.includes(wanted)) { el.click(); return true; }\n"
-        "    }\n"
-        "    const wanted2 = stripEmoji(target);\n"
-        "    if (wanted2){\n"
-        "      for (const el of nodes){\n"
-        "        const t2 = stripEmoji(el.innerText || el.textContent);\n"
-        "        if (t2 && t2.includes(wanted2)) { el.click(); return true; }\n"
-        "      }\n"
-        "    }\n"
-        "    return false;\n"
-        "  }\n"
-        "  let tries = 0;\n"
-        "  const timer = setInterval(()=>{\n"
-        "    tries++;\n"
-        "    if (findAndClick() || tries > 80) clearInterval(timer);\n"
-        "  }, 120);\n"
-        "})();\n"
-        "</script>\n"
-    )
+    return f"""
+<script>
+(function(){{
+  const target = {target_js};
+  if (!target) return;
+
+  const norm = (s)=>String(s||'').replace(/\s+/g,' ').trim();
+  const stripEmoji = (s)=>norm(s).replace(/[\u{{1F000}}-\u{{1FAFF}}]/gu,'').trim();
+
+  function uniq(arr){{ return Array.from(new Set(arr)); }}
+
+  function findTabButtons(doc){{
+    const selectors = [
+      'button[role="tab"]',
+      '[role="tab"]',
+      'div[role="tablist"] button',
+      '[data-baseweb="tab"] button',
+      '[data-testid="stTabs"] button',
+      '[data-testid="stTabs"] [role="tab"]'
+    ];
+    let nodes = [];
+    for (const sel of selectors) {{
+      nodes = nodes.concat(Array.from(doc.querySelectorAll(sel)));
+    }}
+    return uniq(nodes);
+  }}
+
+  function findAndClick(){{
+    const doc = window.parent.document;
+    const nodes = findTabButtons(doc);
+    if (!nodes.length) return false;
+
+    const wanted = norm(target);
+    for (const el of nodes) {{
+      const t = norm(el.innerText || el.textContent);
+      if (t && t.includes(wanted)) {{ el.click(); return true; }}
+    }}
+
+    const wanted2 = stripEmoji(target);
+    if (wanted2) {{
+      for (const el of nodes) {{
+        const t2 = stripEmoji(el.innerText || el.textContent);
+        if (t2 && t2.includes(wanted2)) {{ el.click(); return true; }}
+      }}
+    }}
+    return false;
+  }}
+
+  let tries = 0;
+  const maxTries = 40; // ~4s
+  const timer = setInterval(()=>{{
+    tries++;
+    try {{
+      if (findAndClick() || tries >= maxTries) clearInterval(timer);
+    }} catch(e) {{
+      if (tries >= maxTries) clearInterval(timer);
+    }}
+  }}, 100);
+}})();
+</script>
+"""
 
 
 def _get_secret(name: str, default: str = "") -> str:
