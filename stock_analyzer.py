@@ -135,44 +135,39 @@ def js_close_sidebar():
     """
 
 def js_open_tab(tab_label: str) -> str:
-    """Return HTML+JS that selects a Streamlit tab by its visible label (best-effort)."""
-    safe_label = (tab_label or "").replace('"', '\"')
-    return f"""
-<script>
-(function() {{
-  const target = "{safe_label}".trim();
-  if (!target) return;
-
-  function getDoc() {{
-    try {{ return (window.parent && window.parent.document) ? window.parent.document : document; }}
-    catch (e) {{ return document; }}
-  }}
-
-  function clickTab() {{
-    const doc = getDoc();
-    const tabs = Array.from(doc.querySelectorAll('[role="tab"], button[role="tab"]'));
-    if (!tabs.length) return false;
-
-    const normalize = (s) => (s || '').replace(/\s+/g,' ').trim();
-    const wanted = normalize(target);
-
-    for (const t of tabs) {{
-      const label = normalize(t.innerText);
-      if (label === wanted || label.includes(wanted)) {{
-        try {{ t.click(); return true; }} catch (e) {{}}
-      }}
-    }}
-    return false;
-  }}
-
-  let tries = 0;
-  const timer = setInterval(() => {{
-    tries++;
-    if (clickTab() || tries > 20) clearInterval(timer);
-  }}, 120);
-}})();
-</script>
-"""
+    """Return HTML+JS that selects a Streamlit tab by matching its visible label (best-effort)."""
+    safe_label = (tab_label or "").strip()
+    target_js = json.dumps(safe_label)  # safe JS string literal
+    return (
+        "<script>\n"
+        "(function(){\n"
+        "  const target = " + target_js + ";\n"
+        "  if (!target) return;\n"
+        "  function norm(s){return (s||'').replace(/\\s+/g,' ').trim();}\n"
+        "  function stripEmoji(s){return norm(s).replace(/[\\u{1F300}-\\u{1FAFF}]/gu,'').trim();}\n"
+        "  function findAndClick(){\n"
+        "    const doc = window.parent.document;\n"
+        "    const buttons = Array.from(doc.querySelectorAll('button[role=\"tab\"], [data-baseweb=\"tab\"] button, [data-testid=\"stTabs\"] button'));\n"
+        "    if (!buttons.length) return false;\n"
+        "    const wanted = norm(target);\n"
+        "    for (const b of buttons){\n"
+        "      const t = norm(b.innerText);\n"
+        "      if (t && (t.includes(wanted) || wanted.includes(t))){ b.click(); return true; }\n"
+        "    }\n"
+        "    const wanted2 = stripEmoji(target);\n"
+        "    if (wanted2){\n"
+        "      for (const b of buttons){\n"
+        "        const t2 = stripEmoji(b.innerText);\n"
+        "        if (t2 && (t2.includes(wanted2) || wanted2.includes(t2))){ b.click(); return true; }\n"
+        "      }\n"
+        "    }\n"
+        "    return false;\n"
+        "  }\n"
+        "  let tries=0;\n"
+        "  const timer=setInterval(()=>{ tries++; if (findAndClick() || tries>25) clearInterval(timer); }, 120);\n"
+        "})();\n"
+        "</script>\n"
+    )
 
 
 def _get_secret(name: str, default: str = "") -> str:
@@ -1059,6 +1054,16 @@ def generate_ai_analyst_report(
             "confidence": "N/A"
         }
     # Prepare context
+    json_schema = """{
+      "market_situation": "Drsné shrnutí toho, co si trh myslí (např. 'Investoři panikaří, že AI vymaže jejich moat').",
+      "bull_case": ["Argument pro růst (např. 'AI nástroje zvednou efektivitu')"],
+      "bear_case": ["EXISTENCIÁLNÍ RIZIKO 1 (např. 'Sora nahradí video editor')", "RIZIKO 2"],
+      "verdict": "BUY/HOLD/SELL (podle poměru riziko/zisk)",
+      "wait_for_price": 0,
+      "reasoning": "Syntéza: Je strach z nahrazení přehnaný, nebo oprávněný?",
+      "confidence": "HIGH/MEDIUM/LOW"
+    }"""
+
     context = f"""
 Jsi brutálně upřímný seniorní hedge fond manažer. Analyzuj akcii {company} ({ticker}).
 
@@ -1080,15 +1085,7 @@ INSTRUKCE PRO ANALÝZU (Kritické myšlení):
 3. Pokud tržní cena padá (záporné MOS), vysvětli PROČ se trh bojí. Je to jen panika, nebo "konec éry"?
 
 VÝSTUP JSON:
-{
-  "market_situation": "Drsné shrnutí toho, co si trh myslí (např. 'Investoři panikaří, že AI vymaže jejich moat').",
-  "bull_case": ["Argument pro růst (např. 'AI nástroje zvednou efektivitu')"],
-  "bear_case": ["EXISTENCIÁLNÍ RIZIKO 1 (např. 'Sora nahradí video editor')", "RIZIKO 2"],
-  "verdict": "BUY/HOLD/SELL (podle poměru riziko/zisk)",
-  "wait_for_price": <číslo>,
-  "reasoning": "Syntéza: Je strach z nahrazení přehnaný, nebo oprávněný?",
-  "confidence": "HIGH/MEDIUM/LOW"
-}
+{json_schema}
 """
     
     try:
@@ -2104,7 +2101,7 @@ def main():
             st.info("🤖 Gemini AI je připraven vygenerovat hloubkovou analýzu")
             
             if st.button("🚀 Vygenerovat AI Report", use_container_width=True, type="primary"):
-                st.session_state.force_tab_label = "🤖 AI Analyst"
+                st.session_state.force_tab_label = "AI Analyst"
                 with st.spinner("🧠 AI analytik přemýšlí... (může trvat 10-20s)"):
                     ai_report = generate_ai_analyst_report(
                         ticker=ticker,
@@ -2607,7 +2604,7 @@ def main():
             with analyze_col1:
                 do_analyze = st.button("Analyzovat Sentiment", use_container_width=True, key="btn_analyze_social")
                 if do_analyze:
-                    st.session_state.force_tab_label = "🐦 Social & Guru"
+                    st.session_state.force_tab_label = "Social & Guru"
             with analyze_col2:
                 st.caption("Použije Gemini (pokud je nastaven GEMINI_API_KEY).")
 
