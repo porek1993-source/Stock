@@ -421,7 +421,6 @@ def get_fcf_ttm_yfinance(ticker: str, market_cap: Optional[float] = None) -> Tup
                 "Total Cash From Operating Activities (Continuing Operations)",
                 "Cash Flow From Continuing Operating Activities",
                 "Net Cash Provided By Operating Activities",
-                "Cash Flow From Operating Activities"
             ])
             capex_row = _pick_row(qcf, [
                 "Capital Expenditures",
@@ -429,7 +428,6 @@ def get_fcf_ttm_yfinance(ticker: str, market_cap: Optional[float] = None) -> Tup
                 "CapitalExpenditures",
                 "Purchase Of PPE",
                 "Purchase of Property Plant Equipment",
-                "Payments for Property Plant and Equipment"
             ])
             if ocf_row and capex_row:
                 ocf = pd.to_numeric(qcf.loc[ocf_row, cols_sel], errors="coerce")
@@ -458,20 +456,7 @@ def get_fcf_ttm_yfinance(ticker: str, market_cap: Optional[float] = None) -> Tup
                         print(msg)
                         return fcf_ttm, dbg
 
-            
-            # Financial fallback: pokud selže kvartální FCF a jde o Financials, vezmi info['freeCashflow'] jako prioritu
-            try:
-                info_fin = getattr(t, "info", None) or {}
-            except Exception:
-                info_fin = {}
-            sector_fin = str(info_fin.get("sector") or "").lower()
-            if ("financial" in sector_fin) and fcf_ttm is None:
-                v_fin = safe_float(info_fin.get("freeCashflow"))
-                if v_fin and v_fin > 0:
-                    dbg.append("FCF: Financial fallback -> používám info['freeCashflow'] (kvartální cashflow nebyl dostupný).")
-                    return float(v_fin), dbg
-
-# last resort: info['freeCashflow']
+            # last resort: info['freeCashflow']
             try:
                 info = getattr(t, "info", None) or {}
             except Exception:
@@ -1034,35 +1019,36 @@ def generate_ai_analyst_report(
         }
     
     # Prepare context
-    context = f"""
-Analyzuj akci {company} ({ticker}) a poskytni hloubkový investiční report.
+        context = f"""
+Jsi brutálně upřímný seniorní hedge fond manažer. Analyzuj akcii {company} ({ticker}).
 
 AKTUÁLNÍ DATA:
 - Cena: {fmt_money(current_price)}
-- Férovka (DCF): {fmt_money(dcf_fair_value)}
+- Férovka (DCF): {fmt_money(dcf_fair_value)} (Tvůj model)
 - Scorecard: {scorecard:.1f}/100
-- P/E: {fmt_num(metrics.get('pe').value if metrics.get('pe') else None)}
-- Revenue Growth: {fmt_pct(metrics.get('revenue_growth').value if metrics.get('revenue_growth') else None)}
-- Operating Margin: {fmt_pct(metrics.get('operating_margin').value if metrics.get('operating_margin') else None)}
-- FCF Yield: {fmt_pct(metrics.get('fcf_yield').value if metrics.get('fcf_yield') else None)}
-- Insider Signal: {insider_signal.get('label', 'N/A')} ({insider_signal.get('signal', 0):.0f}/100)
+- P/E: {fmt_num(metrics.get('pe').value)}
 - Sektor: {info.get('sector', 'N/A')}
 
-MAKRO UDÁLOSTI (příští 2 měsíce):
-{chr(10).join([f"- {e['date']}: {e['event']} ({e['importance']})" for e in macro_events[:5]])}
+MAKRO & TRH:
+{chr(10).join([f"- {e['date']}: {e['event']}" for e in macro_events[:3]])}
 
-INSTRUKCE:
-- Kromě poskytnutých čísel zapoj své znalosti o aktuálním byznys modelu firmy a tržních narativech (např. vliv investic do AI na marže u Big Tech, regulatorní rizika, nebo cykličnost odvětví).
-Vrať POUZE validní JSON s těmito klíči (žádný další text):
-{{
-  "market_situation": "1-2 věty: jak si firma stojí v konkurenčním boji, co je hlavní tržní narativ a jaké jsou hlavní obavy investorů (např. u Googlu monetizace AI vyhledávání).",
-  "bull_case": ["důvod 1", "důvod 2", "důvod 3"],
-  "bear_case": ["riziko 1 (včetně fundamentálních rizik mimo čísla, např. vysoký AI CapEx bez návratnosti)", "riziko 2", "riziko 3"],
-  "verdict": "BUY/HOLD/SELL",
-  "wait_for_price": <číslo - konkrétní cena pro vstup, nebo null>,
-  "reasoning": "2-3 věty proč tento verdikt a wait_for_price",
+INSTRUKCE PRO ANALÝZU (Kritické myšlení):
+1. **Ignoruj marketingové řeči firmy.** Soustřeď se na to, co ohrožuje její existenci.
+2. **AI DISRUPCE:** Pokud je firma v tech/software sektoru (např. Adobe, Google, Chegg), Tvým HLAVNÍM úkolem je analyzovat, zda **Generativní AI může jejich produkt kompletně nahradit**.
+   - Příklad Adobe: "Hrozí, že nástroje jako Sora/Midjourney udělají z Photoshopu zbytečnost pro 90% lidí?"
+   - Příklad Google: "Hrozí, že ChatGPT/Perplexity zničí monopol vyhledávání?"
+3. Pokud tržní cena padá (záporné MOS), vysvětli PROČ se trh bojí. Je to jen panika, nebo "konec éry"?
+
+VÝSTUP JSON:
+{
+  "market_situation": "Drsné shrnutí toho, co si trh myslí (např. 'Investoři panikaří, že AI vymaže jejich moat').",
+  "bull_case": ["Argument pro růst (např. 'AI nástroje zvednou efektivitu')"],
+  "bear_case": ["EXISTENCIÁLNÍ RIZIKO 1 (např. 'Sora nahradí video editor')", "RIZIKO 2"],
+  "verdict": "BUY/HOLD/SELL (podle poměru riziko/zisk)",
+  "wait_for_price": <číslo>,
+  "reasoning": "Syntéza: Je strach z nahrazení přehnaný, nebo oprávněný?",
   "confidence": "HIGH/MEDIUM/LOW"
-}}
+}
 """
     
     try:
@@ -1441,10 +1427,7 @@ def estimate_smart_params(info: Dict[str, Any], metrics: Dict[str, "Metric"]) ->
 
     # STROP NÁSOBKU: Aby nám Microsoft neulétl na 35x
     # I tu nejlepší firmu v modelu prodáváme max za 25x FCF
-    # Super Quality exception: pokud má firma profit_margin > 30% a ROE > 30%, dovolíme vyšší strop
-    super_quality = (pm > 0.30 and roe > 0.30)
-    cap_multiple = 28.0 if super_quality else 22.0
-    exit_multiple = min(cap_multiple, exit_multiple)
+    exit_multiple = min(22.0, exit_multiple)
 
     return {
         "wacc": float(wacc),
@@ -1761,8 +1744,6 @@ def main():
         fcf, fcf_dbg = get_fcf_ttm_yfinance(ticker, market_cap_for_fcf)
         for _m in (fcf_dbg or []):
             print(_m)
-        if not fcf or fcf <= 0:
-            st.error("⚠️ Nepodařilo se načíst data o Cash Flow pro tento ticker.")
         shares = safe_float(info.get("sharesOutstanding"))
         current_price = metrics.get("price").value if metrics.get("price") else None
 
