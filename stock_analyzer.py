@@ -161,7 +161,7 @@ except Exception:
 APP_NAME = "Stock Picker Pro"
 APP_VERSION = "v2.0"
 
-GEMINI_MODEL = "gemini-2.5-flash-lite"
+GEMINI_MODEL = "gemini-2.0-flash-exp"
 
 
 
@@ -421,6 +421,7 @@ def get_fcf_ttm_yfinance(ticker: str, market_cap: Optional[float] = None) -> Tup
                 "Total Cash From Operating Activities (Continuing Operations)",
                 "Cash Flow From Continuing Operating Activities",
                 "Net Cash Provided By Operating Activities",
+                "Cash Flow From Operating Activities"
             ])
             capex_row = _pick_row(qcf, [
                 "Capital Expenditures",
@@ -428,6 +429,7 @@ def get_fcf_ttm_yfinance(ticker: str, market_cap: Optional[float] = None) -> Tup
                 "CapitalExpenditures",
                 "Purchase Of PPE",
                 "Purchase of Property Plant Equipment",
+                "Payments for Property Plant and Equipment"
             ])
             if ocf_row and capex_row:
                 ocf = pd.to_numeric(qcf.loc[ocf_row, cols_sel], errors="coerce")
@@ -456,7 +458,20 @@ def get_fcf_ttm_yfinance(ticker: str, market_cap: Optional[float] = None) -> Tup
                         print(msg)
                         return fcf_ttm, dbg
 
-            # last resort: info['freeCashflow']
+            
+            # Financial fallback: pokud selže kvartální FCF a jde o Financials, vezmi info['freeCashflow'] jako prioritu
+            try:
+                info_fin = getattr(t, "info", None) or {}
+            except Exception:
+                info_fin = {}
+            sector_fin = str(info_fin.get("sector") or "").lower()
+            if ("financial" in sector_fin) and fcf_ttm is None:
+                v_fin = safe_float(info_fin.get("freeCashflow"))
+                if v_fin and v_fin > 0:
+                    dbg.append("FCF: Financial fallback -> používám info['freeCashflow'] (kvartální cashflow nebyl dostupný).")
+                    return float(v_fin), dbg
+
+# last resort: info['freeCashflow']
             try:
                 info = getattr(t, "info", None) or {}
             except Exception:
@@ -1037,11 +1052,12 @@ MAKRO UDÁLOSTI (příští 2 měsíce):
 {chr(10).join([f"- {e['date']}: {e['event']} ({e['importance']})" for e in macro_events[:5]])}
 
 INSTRUKCE:
+- Kromě poskytnutých čísel zapoj své znalosti o aktuálním byznys modelu firmy a tržních narativech (např. vliv investic do AI na marže u Big Tech, regulatorní rizika, nebo cykličnost odvětví).
 Vrať POUZE validní JSON s těmito klíči (žádný další text):
 {{
-  "market_situation": "1-2 věty o aktuální tržní situaci a co to znamená pro tuto akcii",
+  "market_situation": "1-2 věty: jak si firma stojí v konkurenčním boji, co je hlavní tržní narativ a jaké jsou hlavní obavy investorů (např. u Googlu monetizace AI vyhledávání).",
   "bull_case": ["důvod 1", "důvod 2", "důvod 3"],
-  "bear_case": ["riziko 1", "riziko 2", "riziko 3"],
+  "bear_case": ["riziko 1 (včetně fundamentálních rizik mimo čísla, např. vysoký AI CapEx bez návratnosti)", "riziko 2", "riziko 3"],
   "verdict": "BUY/HOLD/SELL",
   "wait_for_price": <číslo - konkrétní cena pro vstup, nebo null>,
   "reasoning": "2-3 věty proč tento verdikt a wait_for_price",
@@ -1425,8 +1441,7 @@ def estimate_smart_params(info: Dict[str, Any], metrics: Dict[str, "Metric"]) ->
 
     # STROP NÁSOBKU: Aby nám Microsoft neulétl na 35x
     # I tu nejlepší firmu v modelu prodáváme max za 25x FCF
-    # STROP NÁSOBKU: Mega Caps konzervativně max 22x, ale "Super Quality" může jít výš
-    # Super Quality: profit margin > 30% a ROE > 30% (např. MSFT)
+    # Super Quality exception: pokud má firma profit_margin > 30% a ROE > 30%, dovolíme vyšší strop
     super_quality = (pm > 0.30 and roe > 0.30)
     cap_multiple = 28.0 if super_quality else 22.0
     exit_multiple = min(cap_multiple, exit_multiple)
@@ -1746,6 +1761,8 @@ def main():
         fcf, fcf_dbg = get_fcf_ttm_yfinance(ticker, market_cap_for_fcf)
         for _m in (fcf_dbg or []):
             print(_m)
+        if not fcf or fcf <= 0:
+            st.error("⚠️ Nepodařilo se načíst data o Cash Flow pro tento ticker.")
         shares = safe_float(info.get("sharesOutstanding"))
         current_price = metrics.get("price").value if metrics.get("price") else None
 
