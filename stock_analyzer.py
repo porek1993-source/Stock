@@ -1121,22 +1121,21 @@ VÝSTUP JSON:
         
         # Parse JSON
         # Remove markdown code blocks if present
-        result_text = re.sub(r'```json\s*', '', result_text)
-        result_text = re.sub(r'```\s*', '', result_text)
-        
-result_text = result_text.strip()
+        result_text = (result_text or "")
+        result_text = re.sub(r"```json\s*", "", result_text, flags=re.IGNORECASE)
+        result_text = re.sub(r"```\s*", "", result_text)
+        result_text = result_text.strip()
 
-# Parse JSON robustly (Gemini sometimes returns extra text)
-try:
-    return json.loads(result_text)
-except Exception:
-    # Try to extract the first JSON object from the text
-    m = re.search(r"\{[\s\S]*\}", result_text)
-    if m:
-        candidate = m.group(0).strip()
-        return json.loads(candidate)
-    raise
-    
+        # Parse JSON robustly (Gemini sometimes returns extra text)
+        try:
+            return json.loads(result_text)
+        except Exception:
+            m = re.search(r"\{[\s\S]*\}", result_text)
+            if m:
+                candidate = m.group(0).strip()
+                return json.loads(candidate)
+            raise
+
     except Exception as e:
         return {
             "market_situation": f"AI analýza selhala: {str(e)[:200]}",
