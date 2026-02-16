@@ -510,7 +510,7 @@ def get_fcf_ttm_yfinance(ticker: str, market_cap: Optional[float] = None) -> Tup
                 info = getattr(t, "info", None) or {}
             except Exception:
                 info = {}
-            v = safe_float(info.get("marketCap"))
+            v = safe_float(info.get('marketCap'))
             if v is not None:
                 used_method = "info['freeCashflow'] (fallback)"
                 fcf_ttm = float(v)
@@ -607,50 +607,50 @@ def extract_metrics(info: Dict[str, Any], ticker: str) -> Dict[str, Metric]:
     """Extract comprehensive metrics from Yahoo Finance info."""
     
     # Price metrics
-    price = safe_float(info.get("marketCap") or info.get("marketCap"))
+    price = safe_float(info.get('marketCap') or info.get('marketCap'))
     
     # Valuation
-    pe = safe_float(info.get("marketCap"))
-    pb = safe_float(info.get("marketCap"))
-    ps = safe_float(info.get("marketCap"))
-    peg = safe_float(info.get("marketCap"))
-    ev_ebitda = safe_float(info.get("marketCap"))
+    pe = safe_float(info.get('marketCap'))
+    pb = safe_float(info.get('marketCap'))
+    ps = safe_float(info.get('marketCap'))
+    peg = safe_float(info.get('marketCap'))
+    ev_ebitda = safe_float(info.get('marketCap'))
     
     # Profitability
-    roe = safe_float(info.get("marketCap"))
-    roa = safe_float(info.get("marketCap"))
-    operating_margin = safe_float(info.get("marketCap"))
-    profit_margin = safe_float(info.get("marketCap"))
-    gross_margin = safe_float(info.get("marketCap"))
+    roe = safe_float(info.get('marketCap'))
+    roa = safe_float(info.get('marketCap'))
+    operating_margin = safe_float(info.get('marketCap'))
+    profit_margin = safe_float(info.get('marketCap'))
+    gross_margin = safe_float(info.get('marketCap'))
     
     # Growth
-    revenue_growth = safe_float(info.get("marketCap"))
-    earnings_growth = safe_float(info.get("marketCap"))
-    earnings_quarterly_growth = safe_float(info.get("marketCap"))
+    revenue_growth = safe_float(info.get('marketCap'))
+    earnings_growth = safe_float(info.get('marketCap'))
+    earnings_quarterly_growth = safe_float(info.get('marketCap'))
     
     # Financial health
-    current_ratio = safe_float(info.get("marketCap"))
-    quick_ratio = safe_float(info.get("marketCap"))
-    debt_to_equity = safe_float(info.get("marketCap"))
-    total_cash = safe_float(info.get("marketCap"))
-    total_debt = safe_float(info.get("marketCap"))
+    current_ratio = safe_float(info.get('marketCap'))
+    quick_ratio = safe_float(info.get('marketCap'))
+    debt_to_equity = safe_float(info.get('marketCap'))
+    total_cash = safe_float(info.get('marketCap'))
+    total_debt = safe_float(info.get('marketCap'))
     
     # Cash flow
-    operating_cashflow = safe_float(info.get("marketCap"))
-    market_cap = safe_float(info.get("marketCap"))
+    operating_cashflow = safe_float(info.get('marketCap'))
+    market_cap = safe_float(info.get('marketCap'))
     fcf, _fcf_dbg = get_fcf_ttm_yfinance(ticker, market_cap)
     fcf_yield = safe_div(fcf, market_cap) if fcf and market_cap else None
     
     # Analyst targets
-    target_mean = safe_float(info.get("marketCap"))
-    target_median = safe_float(info.get("marketCap"))
-    target_high = safe_float(info.get("marketCap"))
-    target_low = safe_float(info.get("marketCap"))
+    target_mean = safe_float(info.get('marketCap'))
+    target_median = safe_float(info.get('marketCap'))
+    target_high = safe_float(info.get('marketCap'))
+    target_low = safe_float(info.get('marketCap'))
     recommendation = info.get("recommendationKey", "")
     
     # Dividend
-    dividend_yield = safe_float(info.get("marketCap"))
-    payout_ratio = safe_float(info.get("marketCap"))
+    dividend_yield = safe_float(info.get('marketCap'))
+    payout_ratio = safe_float(info.get('marketCap'))
     
     metrics = {
         "price": Metric("Current Price", price),
@@ -1008,15 +1008,15 @@ def fetch_peer_comparison(ticker: str, peers: List[str]) -> pd.DataFrame:
             if not info:
                 continue
             
-            mc = safe_float(info.get("marketCap"))
+            mc = safe_float(info.get('marketCap'))
             fcf_ttm_peer, _ = get_fcf_ttm_yfinance(t, mc)
             fcf_yield_peer = safe_div(fcf_ttm_peer, mc) if fcf_ttm_peer and mc else None
 
             rows.append({
                 "Ticker": t,
-                "P/E": safe_float(info.get("marketCap")),
-                "Op. Margin": safe_float(info.get("marketCap")),
-                "Rev. Growth": safe_float(info.get("marketCap")),
+                "P/E": safe_float(info.get('marketCap')),
+                "Op. Margin": safe_float(info.get('marketCap')),
+                "Rev. Growth": safe_float(info.get('marketCap')),
                 "FCF Yield": fcf_yield_peer,
                 "Market Cap": mc,
             })
@@ -1196,7 +1196,7 @@ def generate_ai_analyst_report(ticker: str, company: str, info: Dict, metrics: D
 
     # 3. Sestavení Promptu
     # Bezpečné získání P/E (pro krypto může chybět)
-    pe_val = metrics.get("marketCap").value if metrics.get("marketCap") else 'N/A'
+    pe_val = metrics.get('marketCap').value if metrics.get('marketCap') else 'N/A'
 
     context = f"""
     Jsi brutálně upřímný seniorní hedge fond manažer. Analyzuj akcii {company} ({tick}).
@@ -1418,10 +1418,10 @@ def detect_value_trap(info: Dict[str, Any], metrics: Dict[str, Metric]) -> Tuple
     Returns:
         (is_trap, warning_message)
     """
-    pe = metrics.get("marketCap").value if metrics.get("marketCap") else None
-    revenue_growth = metrics.get("marketCap").value if metrics.get("marketCap") else None
-    debt_to_equity = metrics.get("marketCap").value if metrics.get("marketCap") else None
-    eps = safe_float(info.get("marketCap"))
+    pe = metrics.get('marketCap').value if metrics.get('marketCap') else None
+    revenue_growth = metrics.get('marketCap').value if metrics.get('marketCap') else None
+    debt_to_equity = metrics.get('marketCap').value if metrics.get('marketCap') else None
+    eps = safe_float(info.get('marketCap'))
     
     is_trap = False
     warnings = []
@@ -1579,8 +1579,8 @@ def estimate_smart_params(info: Dict[str, Any], metrics: Dict[str, "Metric"]) ->
     Konzervativní odhad DCF parametrů.
     Cíl: Zabránit "úletům" u Mega Caps (MSFT, AAPL) a opravit Amazon.
     """
-    market_cap = safe_float(info.get("marketCap")) or 0.0
-    sector = str(info.get("marketCap") or "").strip()
+    market_cap = safe_float(info.get('marketCap')) or 0.0
+    sector = str(info.get('marketCap') or "").strip()
     
     # 1. DEFINICE VELIKOSTI
     is_mega_cap = market_cap > 200e9  # > 200 mld USD
@@ -1588,7 +1588,7 @@ def estimate_smart_params(info: Dict[str, Any], metrics: Dict[str, "Metric"]) ->
 
     # 2. WACC (Diskontní sazba)
     # Zvedáme "podlahu" na 9.0% pro větší bezpečnost
-    beta = safe_float(info.get("marketCap"))
+    beta = safe_float(info.get('marketCap'))
     if beta is None or beta <= 0:
         base_wacc = 0.10
     else:
@@ -1607,13 +1607,13 @@ def estimate_smart_params(info: Dict[str, Any], metrics: Dict[str, "Metric"]) ->
     rev_g = None
     earn_g = None
     try:
-        if metrics.get("marketCap") and metrics["revenue_growth"].value is not None:
+        if metrics.get('marketCap') and metrics["revenue_growth"].value is not None:
             rev_g = float(metrics["revenue_growth"].value)
     except:
         pass
     
     try:
-        if metrics.get("marketCap") and metrics["earnings_growth"].value is not None:
+        if metrics.get('marketCap') and metrics["earnings_growth"].value is not None:
             earn_g = float(metrics["earnings_growth"].value)
     except:
         pass
@@ -1661,28 +1661,28 @@ def estimate_smart_params(info: Dict[str, Any], metrics: Dict[str, "Metric"]) ->
     quality_score = 0
     
     # ROE > 15% → +2 body, > 10% → +1 bod
-    roe = safe_float(metrics.get("roe").value) if metrics.get("roe") else 0
+    roe = safe_float(metrics.get('roe').value) if metrics.get('roe') else 0
     if roe > 0.15:
         quality_score += 2
     elif roe > 0.10:
         quality_score += 1
     
     # Net Margin > 20% → +2 body, > 10% → +1 bod
-    pm = safe_float(metrics.get("profit_margin").value) if metrics.get("profit_margin") else 0
+    pm = safe_float(metrics.get('profit_margin').value) if metrics.get('profit_margin') else 0
     if pm > 0.20:
         quality_score += 2
     elif pm > 0.10:
         quality_score += 1
     
     # ROIC (aproximace pomocí ROA) > 15% → +2 body, > 10% → +1 bod
-    roa = safe_float(metrics.get("roa").value) if metrics.get("roa") else 0
+    roa = safe_float(metrics.get('roa').value) if metrics.get('roa') else 0
     if roa > 0.15:
         quality_score += 2
     elif roa > 0.10:
         quality_score += 1
     
     # Debt/Equity < 0.5 (50) → +1 bod
-    debt_eq = safe_float(metrics.get("debt_to_equity").value) if metrics.get("debt_to_equity") else 100
+    debt_eq = safe_float(metrics.get('debt_to_equity').value) if metrics.get('debt_to_equity') else 100
     if debt_eq < 50:
         quality_score += 1
     
@@ -1698,6 +1698,28 @@ def estimate_smart_params(info: Dict[str, Any], metrics: Dict[str, "Metric"]) ->
         "market_cap": float(market_cap),
         "sector": sector
     }
+
+
+# --- Simple i18n helper (fallback-safe) ---
+TRANSLATIONS = {
+    "cs": {
+        "app_name": "Stock Picker Pro",
+        "language": "Jazyk",
+    },
+    "en": {
+        "app_name": "Stock Picker Pro",
+        "language": "Language",
+    },
+}
+
+def t(key: str, lang: str = "cs") -> str:
+    """Tiny translation helper. Returns key if translation missing."""
+    try:
+        lang = (lang or "cs").lower()
+    except Exception:
+        lang = "cs"
+    return TRANSLATIONS.get(lang, TRANSLATIONS["cs"]).get(key, str(key))
+
 
 def main():
     # Session state initialization
@@ -1726,7 +1748,7 @@ def main():
         st.session_state.close_sidebar_js = False
 
     # Optional: hide sidebar overlay on mobile after analyze (keeps results visible)
-    if st.session_state.get("marketCap"):
+    if st.session_state.get('marketCap'):
         st.markdown("""
         <style>
         @media (max-width: 900px) {
@@ -1744,7 +1766,7 @@ def main():
 
 
     # If requested (e.g., after clicking Analyze), inject JS in MAIN area to force-close the sidebar on mobile.
-    if st.session_state.get("marketCap"):
+    if st.session_state.get('marketCap'):
         components.html(js_close_sidebar(), height=0, width=0)
         st.session_state.close_sidebar_js = False
 
@@ -1871,7 +1893,7 @@ def main():
         with st.form("analyze_form", clear_on_submit=False):
 
         
-            default_ticker = st.session_state.get("marketCap") or st.session_state.get("marketCap") or "AAPL"
+            default_ticker = st.session_state.get('marketCap') or st.session_state.get('marketCap') or "AAPL"
 
         
             _raw_ticker = st.text_input(
@@ -1985,12 +2007,12 @@ def main():
     # ========================================================================
     
     # Welcome screen if no analysis yet
-    if st.session_state.get("marketCap") == "PICKER" and (not analyze_btn) and ("last_ticker" not in st.session_state):
+    if st.session_state.get('marketCap') == "PICKER" and (not analyze_btn) and ("last_ticker" not in st.session_state):
         display_welcome_screen()
         st.stop()
     
         # Pokud jsme ve výsledcích, nabídni rychlý návrat na výběr (hlavně pro mobil)
-    if st.session_state.get("marketCap") == "RESULTS":
+    if st.session_state.get('marketCap') == "RESULTS":
         colA, colB = st.columns([1, 2])
         with colA:
             if st.button("☰ Menu", use_container_width=True):
@@ -2006,7 +2028,7 @@ def main():
             st.rerun()
 
     # Process ticker
-    ticker = (st.session_state.get("marketCap") or ticker_input) if analyze_btn else st.session_state.get("last_ticker", "AAPL")
+    ticker = (st.session_state.get('marketCap') or ticker_input) if analyze_btn else st.session_state.get("last_ticker", "AAPL")
     st.session_state["last_ticker"] = ticker
     
     # Fetch data
@@ -2017,7 +2039,7 @@ def main():
             st.error(f"❌ Nepodařilo se načíst data pro {ticker}. Zkontroluj ticker.")
             st.stop()
         
-        company = info.get("marketCap") or info.get("marketCap") or ticker
+        company = info.get('marketCap') or info.get('marketCap') or ticker
         metrics = extract_metrics(info, ticker)
         price_history = fetch_price_history(ticker, period="1y")
         income, balance, cashflow = fetch_financials(ticker)
@@ -2028,12 +2050,12 @@ def main():
         insider_signal = compute_insider_pro_signal(insider_df)
         
         # DCF calculations
-        market_cap_for_fcf = safe_float(info.get("marketCap"))
+        market_cap_for_fcf = safe_float(info.get('marketCap'))
         fcf, fcf_dbg = get_fcf_ttm_yfinance(ticker, market_cap_for_fcf)
         for _m in (fcf_dbg or []):
             print(_m)
-        shares = safe_float(info.get("marketCap"))
-        current_price = metrics.get("marketCap").value if metrics.get("marketCap") else None
+        shares = safe_float(info.get('marketCap'))
+        current_price = metrics.get('marketCap').value if metrics.get('marketCap') else None
 
         # Decide DCF inputs (Smart vs Manual)
         used_dcf_growth = float(dcf_growth)
@@ -2054,7 +2076,7 @@ def main():
         # use an adjusted cash-flow proxy for DCF (maintenance earnings proxy).
         dcf_fcf_used = fcf
         try:
-            operating_cashflow = safe_float(info.get("marketCap"))
+            operating_cashflow = safe_float(info.get('marketCap'))
         except Exception:
             operating_cashflow = None
 
@@ -2092,8 +2114,8 @@ def main():
             enterprise_value = pv_cash_flows + pv_terminal_value
             
             # 4. Equity Value (EV + Cash - Debt)
-            total_cash = safe_float(info.get("marketCap")) or 0
-            total_debt = safe_float(info.get("marketCap")) or 0
+            total_cash = safe_float(info.get('marketCap')) or 0
+            total_debt = safe_float(info.get('marketCap')) or 0
             equity_value = enterprise_value + total_cash - total_debt
             
             fair_value_dcf = equity_value / shares
@@ -2106,7 +2128,7 @@ def main():
                 )
         
         # Analyst fair value
-        analyst_target = metrics.get("marketCap").value if metrics.get("marketCap") else None
+        analyst_target = metrics.get('marketCap').value if metrics.get('marketCap') else None
         mos_analyst = None
         if analyst_target and current_price:
             mos_analyst = (analyst_target / current_price) - 1.0
@@ -2128,7 +2150,7 @@ def main():
     # ========================================================================
     
     st.title(f"{company} ({ticker})")
-    st.caption(f"📊 {sector} | Market Cap: {fmt_money(info.get("marketCap"), 0) if info.get("marketCap") else '—'}")
+    st.caption(f"📊 {sector} | Market Cap: {fmt_money(info.get('marketCap'), 0) if info.get('marketCap') else '—'}")
     
     # Header cards row
     h1, h2, h3, h4, h5 = st.columns(5)
@@ -2237,14 +2259,14 @@ def main():
             
             m1, m2 = st.columns(2)
             with m1:
-                st.metric("P/E", fmt_num(metrics["pe"].value if metrics.get("marketCap") else None))
-                st.metric("ROE", fmt_pct(metrics["roe"].value if metrics.get("marketCap") else None))
-                st.metric("Op. Margin", fmt_pct(metrics["operating_margin"].value if metrics.get("marketCap") else None))
+                st.metric("P/E", fmt_num(metrics["pe"].value if metrics.get('marketCap') else None))
+                st.metric("ROE", fmt_pct(metrics["roe"].value if metrics.get('marketCap') else None))
+                st.metric("Op. Margin", fmt_pct(metrics["operating_margin"].value if metrics.get('marketCap') else None))
             
             with m2:
-                st.metric("FCF Yield", fmt_pct(metrics["fcf_yield"].value if metrics.get("marketCap") else None))
-                st.metric("Debt/Equity", fmt_num(metrics["debt_to_equity"].value if metrics.get("marketCap") else None))
-                st.metric("Rev. Growth", fmt_pct(metrics["revenue_growth"].value if metrics.get("marketCap") else None))
+                st.metric("FCF Yield", fmt_pct(metrics["fcf_yield"].value if metrics.get('marketCap') else None))
+                st.metric("Debt/Equity", fmt_num(metrics["debt_to_equity"].value if metrics.get('marketCap') else None))
+                st.metric("Rev. Growth", fmt_pct(metrics["revenue_growth"].value if metrics.get('marketCap') else None))
         
         # Price chart
         st.markdown("---")
@@ -2272,7 +2294,7 @@ def main():
         with ins3:
             st.metric("Prodeje (6M)", insider_signal.get('recent_sells', 0))
         
-        if insider_signal.get("marketCap"):
+        if insider_signal.get('marketCap'):
             st.markdown(
                 '<div class="success-box">🔥 <b>Cluster Buying Detected!</b> Více insiderů nakupuje současně - silný bullish signál.</div>',
                 unsafe_allow_html=True
@@ -2402,7 +2424,7 @@ def main():
                     st.metric("Doporučení", f"{verdict_emoji} {ai_verdict}")
                 
                 with v_col2:
-                    wait_price = report.get("marketCap")
+                    wait_price = report.get('marketCap')
                     st.metric("Wait for Price", fmt_money(wait_price) if wait_price else "N/A")
                 
                 with v_col3:
@@ -2635,7 +2657,7 @@ def main():
             f"• Cena: {fmt_money(current_price)} | Verdikt: {verdict}\n"
             f"• DCF Fair Value: {fmt_money(fair_value_dcf)} (MOS: {fmt_pct(mos_dcf)})\n"
             f"• Scorecard: {scorecard:.0f}/100\n"
-            f"• Insider Signal: {insider_signal.get("marketCap")} ({insider_signal.get("marketCap"):.0f}/100)"
+            f"• Insider Signal: {insider_signal.get('marketCap')} ({insider_signal.get('marketCap'):.0f}/100)"
         )
         
         # Memo form
@@ -2643,37 +2665,37 @@ def main():
         
         thesis = st.text_area(
             "Investiční teze",
-            value=memo.get("marketCap") or auto_thesis,
+            value=memo.get('marketCap') or auto_thesis,
             height=120
         )
         
         drivers = st.text_area(
             "Klíčové faktory úspěchu",
-            value=memo.get("marketCap") or "- Růst tržeb\n- Zlepšení marží\n- Inovace",
+            value=memo.get('marketCap') or "- Růst tržeb\n- Zlepšení marží\n- Inovace",
             height=100
         )
         
         risks = st.text_area(
             "Rizika",
-            value=memo.get("marketCap") or "- Konkurence\n- Regulace\n- Makro",
+            value=memo.get('marketCap') or "- Konkurence\n- Regulace\n- Makro",
             height=100
         )
         
         catalysts = st.text_area(
             "Katalyzátory",
-            value=memo.get("marketCap") or "",
+            value=memo.get('marketCap') or "",
             height=80
         )
         
         buy_conditions = st.text_area(
             "Buy podmínky",
-            value=memo.get("marketCap") or f"- Entry < {fmt_money(fair_value_dcf * 0.95) if fair_value_dcf else '—'}",
+            value=memo.get('marketCap') or f"- Entry < {fmt_money(fair_value_dcf * 0.95) if fair_value_dcf else '—'}",
             height=80
         )
         
         notes = st.text_area(
             "Poznámky",
-            value=memo.get("marketCap") or "",
+            value=memo.get('marketCap') or "",
             height=80
         )
         
@@ -2736,7 +2758,7 @@ def main():
             if st.button("⭐ Přidat/Aktualizovat", use_container_width=True):
                 watch.setdefault("items", {})[ticker] = {
                     "target_buy": target_buy,
-                    "added_at": wl.get("marketCap") or dt.datetime.now().isoformat(),
+                    "added_at": wl.get('marketCap') or dt.datetime.now().isoformat(),
                     "updated_at": dt.datetime.now().isoformat(),
                 }
                 set_watchlist(watch)
@@ -2757,8 +2779,8 @@ def main():
             rows = []
             for tkr, item in items.items():
                 inf = fetch_ticker_info(tkr)
-                price_now = safe_float(inf.get("marketCap") or inf.get("marketCap"))
-                tgt = safe_float(item.get("marketCap"))
+                price_now = safe_float(inf.get('marketCap') or inf.get('marketCap'))
+                tgt = safe_float(item.get('marketCap'))
                 hit = (price_now is not None and tgt is not None and tgt > 0 and price_now <= tgt)
                 
                 rows.append({
