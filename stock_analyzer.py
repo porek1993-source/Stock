@@ -135,73 +135,51 @@ def js_close_sidebar():
     """
 
 def js_open_tab(tab_label: str) -> str:
-    """Return HTML+JS that selects a Streamlit tab by matching its visible label (best-effort)."""
+    """Return HTML+JS that re-selects a Streamlit tab by matching its visible label (best-effort)."""
     label = (tab_label or "").strip()
     target_js = json.dumps(label)  # safe JS string literal
 
-    return f"""
-<script>
-(function(){{
+    # IMPORTANT: avoid any '\u' sequences inside this Python string (can trigger unicodeescape issues)
+    return f"""<script>
+(function() {{
   const target = {target_js};
   if (!target) return;
 
-  const norm = (s)=>String(s||'').replace(/\s+/g,' ').trim();
-  const stripEmoji = (s)=>norm(s).replace(/[\u{{1F000}}-\u{{1FAFF}}]/gu,'').trim();
+  const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+  const targetNorm = norm(target);
 
-  function uniq(arr){{ return Array.from(new Set(arr)); }}
-
-  function findTabButtons(doc){{
-    const selectors = [
-      'button[role="tab"]',
-      '[role="tab"]',
-      'div[role="tablist"] button',
-      '[data-baseweb="tab"] button',
-      '[data-testid="stTabs"] button',
-      '[data-testid="stTabs"] [role="tab"]'
-    ];
-    let nodes = [];
-    for (const sel of selectors) {{
-      nodes = nodes.concat(Array.from(doc.querySelectorAll(sel)));
-    }}
-    return uniq(nodes);
+  function findTabs() {{
+    // Streamlit tabs are generally buttons/elems with role="tab"
+    return Array.from(window.parent.document.querySelectorAll('[role="tab"], button[role="tab"]'));
   }}
 
-  function findAndClick(){{
-    const doc = window.parent.document;
-    const nodes = findTabButtons(doc);
-    if (!nodes.length) return false;
+  function trySelect() {{
+    const tabs = findTabs();
+    if (!tabs.length) return false;
 
-    const wanted = norm(target);
-    for (const el of nodes) {{
-      const t = norm(el.innerText || el.textContent);
-      if (t && t.includes(wanted)) {{ el.click(); return true; }}
-    }}
+    for (const t of tabs) {{
+      const text = norm(t.innerText || t.textContent || '');
+      if (!text) continue;
 
-    const wanted2 = stripEmoji(target);
-    if (wanted2) {{
-      for (const el of nodes) {{
-        const t2 = stripEmoji(el.innerText || el.textContent);
-        if (t2 && t2.includes(wanted2)) {{ el.click(); return true; }}
+      // Match either exact label or label without emojis (simple fallback: remove non-ascii)
+      const textNoEmoji = text.replace(/[^\x20-\x7E]/g, '').trim();
+      const targetNoEmoji = targetNorm.replace(/[^\x20-\x7E]/g, '').trim();
+
+      if (text === targetNorm || textNoEmoji === targetNoEmoji || text.includes(targetNorm) || textNoEmoji.includes(targetNoEmoji)) {{
+        t.click();
+        return true;
       }}
     }}
     return false;
   }}
 
-  let tries = 0;
-  const maxTries = 40; // ~4s
-  const timer = setInterval(()=>{{
-    tries++;
-    try {{
-      if (findAndClick() || tries >= maxTries) clearInterval(timer);
-    }} catch(e) {{
-      if (tries >= maxTries) clearInterval(timer);
-    }}
-  }}, 100);
+  let attempts = 0;
+  const timer = setInterval(() => {{
+    attempts += 1;
+    if (trySelect() || attempts > 30) clearInterval(timer);
+  }}, 150);
 }})();
-</script>
-"""
-
-
+</script>"""
 def _get_secret(name: str, default: str = "") -> str:
     try:
         # Streamlit Cloud secrets
