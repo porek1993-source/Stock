@@ -395,183 +395,76 @@ def fetch_financials(ticker: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFr
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def get_fcf_ttm_yfinance(ticker: str, market_cap: Optional[float] = None) -> Tuple[Optional[float], List[str]]:
-    """Robustně spočítá roční Free Cash Flow (TTM) z yfinance quarterly_cashflow.
-
-    Pravidla:
-    - Primárně sečte poslední 4 dostupné kvartály (TTM).
-    - Když chybí řádek 'Free Cash Flow', spočítá FCF jako Operating Cash Flow - |CapEx|.
-    - Pokud jsou dostupná jen 1-3 kvartální čísla, annualizuje průměrem ×4.
-    - Sanity check: pro obří firmy (MarketCap > $1T) a podezřele nízké FCF (< $30B)
-      aplikuje pojistku násobení 4× (typicky když provider vrátí jen 1 kvartál).
-    - Vrací (fcf_ttm, dbg) kde dbg je list informativních zpráv.
+    """
+    Robustní výpočet FCF (TTM) s opravou pro FinTech (PayPal, Visa).
     """
     dbg: List[str] = []
     try:
         t = yf.Ticker(ticker)
+
+        # 1. Zkusíme přímý údaj z INFO (často nejspolehlivější pro FinTech)
+        # Yahoo pro FinTech často vypočítá FCF správně interně, i když v tabulkách chybí řádky.
+        info = getattr(t, "info", {}) or {}
+        fcf_info = safe_float(info.get("freeCashflow"))
+
+        if fcf_info and fcf_info > 0:
+            msg = f"FCF: Nalezeno přímo v info['freeCashflow']: ${fcf_info/1e9:.2f}B"
+            dbg.append(msg)
+            return float(fcf_info), dbg
+
+        # 2. Pokud není v info, jdeme počítat ručně z kvartálů
         qcf = getattr(t, "quarterly_cashflow", None)
-        if qcf is None or not isinstance(qcf, pd.DataFrame) or qcf.empty:
-            dbg.append("FCF: quarterly_cashflow není k dispozici (prázdné). Zkouším fallback.")
-            qcf = pd.DataFrame()
+        if qcf is None or qcf.empty:
+            return None, ["FCF: Žádná data cashflow."]
 
-        def _pick_row(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
-            if df is None or df.empty:
-                return None
-            idx = set(map(str, df.index))
+        # Pomocná funkce na hledání řádků (protože se jmenují pokaždé jinak)
+        def get_row_val(df, candidates):
             for c in candidates:
-                if c in idx:
-                    return c
-            # zkus case-insensitive match
-            low_map = {str(i).strip().lower(): str(i) for i in df.index}
-            for c in candidates:
-                key = c.strip().lower()
-                if key in low_map:
-                    return low_map[key]
+                if c in df.index:
+                    return df.loc[c]
             return None
 
-        def _sorted_quarter_cols(df: pd.DataFrame) -> List[Any]:
-            cols = list(df.columns)
-            if not cols:
-                return []
-            dts = pd.to_datetime(cols, errors="coerce")
-            if dts.notna().any():
-                order = sorted(range(len(cols)), key=lambda i: dts[i], reverse=True)
-                return [cols[i] for i in order]
-            return cols  # fallback: keep original order
+        # Hledáme OCF (Operating Cash Flow)
+        ocf_series = get_row_val(qcf, [
+            "Operating Cash Flow", 
+            "Total Cash From Operating Activities",
+            "Net Cash Provided By Operating Activities" # Časté u PayPalu
+        ])
 
-        # 1) vyber poslední dostupné kvartály
-        cols_sorted = _sorted_quarter_cols(qcf)
-        cols_sel = cols_sorted[:4] if cols_sorted else []
-        if cols_sel:
-            dbg.append(f"FCF: Načítám kvartály: {', '.join([str(c) for c in cols_sel])}")
-        else:
-            dbg.append("FCF: Nenalezeny žádné kvartální sloupce v quarterly_cashflow.")
+        # Hledáme CapEx (Tady PayPal často padal)
+        capex_series = get_row_val(qcf, [
+            "Capital Expenditures", 
+            "Capital Expenditure", 
+            "Purchase Of PPE",
+            "Purchase Of Property, Plant, Equipment" 
+        ])
 
-        # 2) primárně: přímý řádek Free Cash Flow
-        fcf_row = _pick_row(qcf, ["Free Cash Flow", "FreeCashFlow", "Free cash flow"])
-        used_method = None
+        if ocf_series is not None:
+            # Pokud chybí CapEx (běžné u software/fintech), předpokládáme, že je malý/zahrnutý
+            if capex_series is None:
+                dbg.append("FCF: CapEx nenalezen (FinTech?), počítám FCF = OCF.")
+                fcf_quarters = ocf_series
+            else:
+                fcf_quarters = ocf_series - capex_series.abs()
 
-        fcf_quarters = None
-        non_null = 0
+            # Sečteme poslední 4 kvartály
+            fcf_vals = pd.to_numeric(fcf_quarters, errors='coerce').dropna()
+            if len(fcf_vals) >= 4:
+                fcf_ttm = fcf_vals.iloc[:4].sum()
+            elif len(fcf_vals) > 0:
+                fcf_ttm = fcf_vals.mean() * 4.0 # Extrapolace
+            else:
+                return None, ["FCF: Data jsou samá NaN"]
 
-        if fcf_row and cols_sel:
-            s = pd.to_numeric(qcf.loc[fcf_row, cols_sel], errors="coerce")
-            non_null = int(s.notna().sum())
-            if non_null > 0:
-                fcf_quarters = s
-                used_method = f"quarterly row '{fcf_row}'"
-        # 3) fallback: OCF - |CapEx|
-        if fcf_quarters is None and cols_sel:
-            ocf_row = _pick_row(qcf, [
-                "Operating Cash Flow",
-                "Total Cash From Operating Activities",
-                "Total Cash From Operating Activities (Continuing Operations)",
-                "Cash Flow From Continuing Operating Activities",
-                "Net Cash Provided By Operating Activities",
-            ])
-            capex_row = _pick_row(qcf, [
-                "Capital Expenditures",
-                "Capital Expenditure",
-                "CapitalExpenditures",
-                "Purchase Of PPE",
-                "Purchase of Property Plant Equipment",
-            ])
-            if ocf_row and capex_row:
-                ocf = pd.to_numeric(qcf.loc[ocf_row, cols_sel], errors="coerce")
-                capex = pd.to_numeric(qcf.loc[capex_row, cols_sel], errors="coerce")
-                non_null = int((ocf.notna() & capex.notna()).sum())
-                if non_null > 0:
-                    # CapEx bývá záporný; chceme: FCF = OCF - |CapEx|
-                    fcf_quarters = ocf - capex.abs()
-                    used_method = f"computed: '{ocf_row}' - |'{capex_row}'|"
+            msg = f"FCF: Vypočteno z kvartálů: ${fcf_ttm/1e9:.2f}B"
+            dbg.append(msg)
+            return float(fcf_ttm), dbg
 
-        # 4) pokud pořád nic, fallback na annual cashflow / info
-        if fcf_quarters is None:
-            # annual cashflow
-            acf = getattr(t, "cashflow", None)
-            if isinstance(acf, pd.DataFrame) and not acf.empty:
-                acf_cols = _sorted_quarter_cols(acf)[:1]  # nejnovější rok
-                fcf_row_a = _pick_row(acf, ["Free Cash Flow", "FreeCashFlow", "Free cash flow"])
-                if fcf_row_a and acf_cols:
-                    v = safe_float(acf.loc[fcf_row_a, acf_cols[0]])
-                    if v is not None:
-                        dbg.append("FCF: Používám annual cashflow (nejnovější rok) – řádek Free Cash Flow.")
-                        used_method = "annual row 'Free Cash Flow'"
-                        fcf_ttm = float(v)
-                        msg = f"Použité roční FCF (TTM): ${fcf_ttm/1e9:.1f} miliard ({used_method})"
-                        dbg.append(msg)
-                        print(msg)
-                        return fcf_ttm, dbg
+        return None, ["FCF: Nepodařilo se najít ani OCF."]
 
-            # last resort: info['freeCashflow']
-            try:
-                info = getattr(t, "info", None) or {}
-            except Exception:
-                info = {}
-            v = safe_float(info.get("freeCashflow"))
-            if v is not None:
-                used_method = "info['freeCashflow'] (fallback)"
-                fcf_ttm = float(v)
-                msg = f"Použité roční FCF (TTM): ${fcf_ttm/1e9:.1f} miliard ({used_method})"
-                dbg.append(msg)
-                print(msg)
-                return fcf_ttm, dbg
-
-            dbg.append("FCF: Nepodařilo se získat FCF ani z quarterly ani z annual ani z info.")
-            return None, dbg
-
-        # 5) TTM / extrapolace
-        fcf_vals = pd.to_numeric(fcf_quarters, errors="coerce").dropna()
-        n = int(fcf_vals.shape[0])
-        applied_extrap = False
-        used_sum4 = False
-
-        if n >= 4:
-            fcf_ttm = float(fcf_vals.iloc[:4].sum())
-            used_sum4 = True
-        elif n > 0:
-            # annualizace průměrem ×4
-            fcf_ttm = float(fcf_vals.mean() * 4.0)
-            applied_extrap = True
-        else:
-            dbg.append("FCF: kvartální hodnoty jsou všechny NaN.")
-            return None, dbg
-
-        # 6) Sanity check (market cap > 1T & FCF < 30B) -> 4×
-        mc = safe_float(market_cap)
-        if (not applied_extrap) and used_sum4 and mc and mc > 1e12 and fcf_ttm < 30e9:
-            fcf_ttm *= 4.0
-            dbg.append("FCF: Sanity check aktivován (MarketCap > $1T a FCF < $30B) -> násobím 4× (podezření na 1 kvartál).")
-
-        # 7) Debug zprávy
-        if used_method:
-            dbg.append(f"FCF metoda: {used_method}. Kvartály použity: {n}.")
-        if applied_extrap:
-            dbg.append(f"FCF: Extrapolace do roční báze (k dispozici {n} kvartály) -> průměr ×4.")
-        if used_sum4:
-            dbg.append("FCF: TTM = součet posledních 4 kvartálů.")
-
-        msg = f"Použité roční FCF (TTM): ${fcf_ttm/1e9:.1f} miliard"
-        dbg.append(msg)
-        print(msg)
-
-        return fcf_ttm, dbg
     except Exception as e:
-        dbg.append(f"FCF: chyba při výpočtu TTM: {e}")
-        return None, dbg
-@st.cache_data(show_spinner=False, ttl=3600)
-def get_all_time_high(ticker: str) -> Optional[float]:
-    """Get all-time high price."""
-    try:
-        t = yf.Ticker(ticker)
-        h = t.history(period="max", interval="1d", auto_adjust=False)
-        if h is None or h.empty:
-            return None
-        col = "High" if "High" in h.columns else ("Close" if "Close" in h.columns else None)
-        if not col:
-            return None
-        return float(pd.to_numeric(h[col], errors="coerce").max())
-    except Exception:
-        return None
+        return None, [f"FCF Error: {str(e)}"]
+
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
