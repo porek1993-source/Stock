@@ -1149,32 +1149,59 @@ def generate_ai_analyst_report(ticker: str, company: str, info: Dict, metrics: D
     }}
     """
 
+
+    def _extract_json(text: str) -> Dict[str, Any]:
+        """Try hard to parse JSON from model output."""
+        if not text:
+            raise ValueError("Empty AI response")
+        cleaned = re.sub(r"```json\n?|```", "", str(text)).strip()
+        try:
+            return json.loads(cleaned)
+        except Exception:
+            # Fallback: find first JSON object in the text
+            m = re.search(r"\{[\s\S]*\}", cleaned)
+            if not m:
+                raise
+            return json.loads(m.group(0))
+
     try:
-        # Volání API (podpora pro různé verze knihovny)
-        if GENAI_AVAILABLE:
-            model = genai.GenerativeModel(GEMINI_MODEL)
-            response = model.generate_content(
-                context,
-                generation_config=genai.GenerationConfig(
-                    response_mime_type="application/json"
-                )
-            )
-            raw_text = response.text
-        else:
-            # Fallback
-            model = genai_old.GenerativeModel(GEMINI_MODEL)
-            response = model.generate_content(context)
-            raw_text = response.text
+        raw_text = ""
 
-        # Clean JSON markdown if present
-        cleaned_text = re.sub(r"```json\n?|```", "", raw_text).strip()
-        data = json.loads(cleaned_text)
+        # Prefer new Google GenAI SDK (google-genai)
+        try:
+            from google import genai as genai_new  # type: ignore
+            client = genai_new.Client(api_key=GEMINI_API_KEY)
+            try:
+                from google.genai import types as genai_types  # type: ignore
+                cfg = genai_types.GenerateContentConfig(response_mime_type="application/json")
+                resp = client.models.generate_content(model=GEMINI_MODEL, contents=context, config=cfg)
+            except Exception:
+                # Older/newer variants of the SDK
+                resp = client.models.generate_content(model=GEMINI_MODEL, contents=context)
 
-        # Validace a doplnění chybějících klíčů
+            raw_text = getattr(resp, "text", None) or str(resp)
+
+        except Exception:
+            # Fallback to legacy SDK (google-generativeai)
+            import google.generativeai as genai_legacy  # type: ignore
+            genai_legacy.configure(api_key=GEMINI_API_KEY)
+            model = genai_legacy.GenerativeModel(GEMINI_MODEL)
+            resp = model.generate_content(context)
+            raw_text = getattr(resp, "text", None) or str(resp)
+
+        data = _extract_json(raw_text)
+
+        # Normalize/validate keys expected by the UI
         required = ["market_situation", "bull_case", "bear_case", "verdict", "wait_for_price"]
         for k in required:
             if k not in data:
                 data[k] = "N/A" if k != "wait_for_price" else current_price
+
+        # Optional extras (keep UI stable even if missing)
+        if "reasoning" not in data:
+            data["reasoning"] = ""
+        if "confidence" not in data:
+            data["confidence"] = "MEDIUM"
 
         return data
 
@@ -1185,7 +1212,7 @@ def generate_ai_analyst_report(ticker: str, company: str, info: Dict, metrics: D
             "bear_case": [],
             "verdict": "HOLD",
             "wait_for_price": current_price,
-            "reasoning": "Selhalo spojení s Gemini API.",
+            "reasoning": "Selhalo spojení s Gemini API nebo parsování JSON.",
             "confidence": "LOW"
         }
 
