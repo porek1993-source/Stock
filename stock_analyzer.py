@@ -637,7 +637,7 @@ def extract_metrics(info: Dict[str, Any], ticker: str) -> Dict[str, Metric]:
     
     # Cash flow
     operating_cashflow = safe_float(info.get("operatingCashflow"))
-    market_cap = safe_float(info.get("marketCap"))
+    market_cap = safe_float(info.get('marketCap'))
     fcf, _fcf_dbg = get_fcf_ttm_yfinance(ticker, market_cap)
     fcf_yield = safe_div(fcf, market_cap) if fcf and market_cap else None
     
@@ -1008,7 +1008,7 @@ def fetch_peer_comparison(ticker: str, peers: List[str]) -> pd.DataFrame:
             if not info:
                 continue
             
-            mc = safe_float(info.get("marketCap"))
+            mc = safe_float(info.get('marketCap'))
             fcf_ttm_peer, _ = get_fcf_ttm_yfinance(t, mc)
             fcf_yield_peer = safe_div(fcf_ttm_peer, mc) if fcf_ttm_peer and mc else None
 
@@ -1579,8 +1579,8 @@ def estimate_smart_params(info: Dict[str, Any], metrics: Dict[str, "Metric"]) ->
     Konzervativní odhad DCF parametrů.
     Cíl: Zabránit "úletům" u Mega Caps (MSFT, AAPL) a opravit Amazon.
     """
-    market_cap = safe_float(info.get("marketCap")) or 0.0
-    sector = str(info.get("sector") or "").strip()
+    market_cap = safe_float(info.get('marketCap')) or 0.0
+    sector = str(info.get('sector') or "").strip()
     
     # 1. DEFINICE VELIKOSTI
     is_mega_cap = market_cap > 200e9  # > 200 mld USD
@@ -1698,6 +1698,29 @@ def estimate_smart_params(info: Dict[str, Any], metrics: Dict[str, "Metric"]) ->
         "market_cap": float(market_cap),
         "sector": sector
     }
+
+
+# -------------------------------------------------------------------
+# i18n helper (minimal)
+# -------------------------------------------------------------------
+TRANSLATIONS = {
+    "cs": {
+        "app_name": "Stock Picker Pro",
+        "language": "Jazyk",
+    },
+    "en": {
+        "app_name": "Stock Picker Pro",
+        "language": "Language",
+    },
+}
+
+def t(key: str, lang: str = "cs") -> str:
+    """Tiny translation helper. Returns key if translation missing."""
+    try:
+        lang = (lang or "cs").lower()
+    except Exception:
+        lang = "cs"
+    return TRANSLATIONS.get(lang, TRANSLATIONS["cs"]).get(key, str(key))
 
 def main():
     # Session state initialization
@@ -2028,7 +2051,7 @@ def main():
         insider_signal = compute_insider_pro_signal(insider_df)
         
         # DCF calculations
-        market_cap_for_fcf = safe_float(info.get("marketCap"))
+        market_cap_for_fcf = safe_float(info.get('marketCap'))
         fcf, fcf_dbg = get_fcf_ttm_yfinance(ticker, market_cap_for_fcf)
         for _m in (fcf_dbg or []):
             print(_m)
@@ -2128,7 +2151,7 @@ def main():
     # ========================================================================
     
     st.title(f"{company} ({ticker})")
-    st.caption(f"📊 {sector} | Market Cap: {fmt_money(info.get("marketCap"), 0) if info.get("marketCap") else '—'}")
+    st.caption(f"📊 {sector} | Market Cap: {fmt_money(info.get('marketCap'), 0) if info.get('marketCap') else '—'}")
     
     # Header cards row
     h1, h2, h3, h4, h5 = st.columns(5)
@@ -2635,7 +2658,7 @@ def main():
             f"• Cena: {fmt_money(current_price)} | Verdikt: {verdict}\n"
             f"• DCF Fair Value: {fmt_money(fair_value_dcf)} (MOS: {fmt_pct(mos_dcf)})\n"
             f"• Scorecard: {scorecard:.0f}/100\n"
-            f"• Insider Signal: {insider_signal.get("marketCap")} ({insider_signal.get("marketCap"):.0f}/100)"
+            f"• Insider Signal: {insider_signal.get('label', '—')} ({float(insider_signal.get('signal', 0)):.0f}/100)"
         )
         
         # Memo form
