@@ -134,52 +134,6 @@ def js_close_sidebar():
     </script>
     """
 
-def js_open_tab(tab_label: str) -> str:
-    """Return HTML+JS that re-selects a Streamlit tab by matching its visible label (best-effort)."""
-    label = (tab_label or "").strip()
-    target_js = json.dumps(label)  # safe JS string literal
-
-    # IMPORTANT: avoid any '\u' sequences inside this Python string (can trigger unicodeescape issues)
-    return f"""<script>
-(function() {{
-  const target = {target_js};
-  if (!target) return;
-
-  const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim();
-  const targetNorm = norm(target);
-
-  function findTabs() {{
-    // Streamlit tabs are generally buttons/elems with role="tab"
-    return Array.from(window.parent.document.querySelectorAll('[role="tab"], button[role="tab"]'));
-  }}
-
-  function trySelect() {{
-    const tabs = findTabs();
-    if (!tabs.length) return false;
-
-    for (const t of tabs) {{
-      const text = norm(t.innerText || t.textContent || '');
-      if (!text) continue;
-
-      // Match either exact label or label without emojis (simple fallback: remove non-ascii)
-      const textNoEmoji = text.replace(/[^\x20-\x7E]/g, '').trim();
-      const targetNoEmoji = targetNorm.replace(/[^\x20-\x7E]/g, '').trim();
-
-      if (text === targetNorm || textNoEmoji === targetNoEmoji || text.includes(targetNorm) || textNoEmoji.includes(targetNoEmoji)) {{
-        t.click();
-        return true;
-      }}
-    }}
-    return false;
-  }}
-
-  let attempts = 0;
-  const timer = setInterval(() => {{
-    attempts += 1;
-    if (trySelect() || attempts > 30) clearInterval(timer);
-  }}, 150);
-}})();
-</script>"""
 def _get_secret(name: str, default: str = "") -> str:
     try:
         # Streamlit Cloud secrets
@@ -316,29 +270,6 @@ def safe_float(x: Any) -> Optional[float]:
         return None
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
-def get_all_time_high(ticker: str) -> Optional[float]:
-    """Return all-time high price (max Close) from available historical data.
-
-    Used for quick context in the UI. Returns None if data is unavailable.
-    """
-    try:
-        t = yf.Ticker(ticker)
-        hist = t.history(period="max")
-        if hist is None or hist.empty:
-            return None
-        if "Close" in hist.columns:
-            return float(pd.to_numeric(hist["Close"], errors="coerce").dropna().max())
-        # fallback: first numeric column
-        for col in hist.columns:
-            s = pd.to_numeric(hist[col], errors="coerce").dropna()
-            if not s.empty:
-                return float(s.max())
-        return None
-    except Exception:
-        return None
-
-
 def safe_div(a: Optional[float], b: Optional[float]) -> Optional[float]:
     a = safe_float(a)
     b = safe_float(b)
@@ -418,76 +349,183 @@ def fetch_financials(ticker: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFr
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def get_fcf_ttm_yfinance(ticker: str, market_cap: Optional[float] = None) -> Tuple[Optional[float], List[str]]:
-    """
-    Robustní výpočet FCF (TTM) s opravou pro FinTech (PayPal, Visa).
+    """Robustně spočítá roční Free Cash Flow (TTM) z yfinance quarterly_cashflow.
+
+    Pravidla:
+    - Primárně sečte poslední 4 dostupné kvartály (TTM).
+    - Když chybí řádek 'Free Cash Flow', spočítá FCF jako Operating Cash Flow - |CapEx|.
+    - Pokud jsou dostupná jen 1-3 kvartální čísla, annualizuje průměrem ×4.
+    - Sanity check: pro obří firmy (MarketCap > $1T) a podezřele nízké FCF (< $30B)
+      aplikuje pojistku násobení 4× (typicky když provider vrátí jen 1 kvartál).
+    - Vrací (fcf_ttm, dbg) kde dbg je list informativních zpráv.
     """
     dbg: List[str] = []
     try:
         t = yf.Ticker(ticker)
-
-        # 1. Zkusíme přímý údaj z INFO (často nejspolehlivější pro FinTech)
-        # Yahoo pro FinTech často vypočítá FCF správně interně, i když v tabulkách chybí řádky.
-        info = getattr(t, "info", {}) or {}
-        fcf_info = safe_float(info.get("freeCashflow"))
-
-        if fcf_info and fcf_info > 0:
-            msg = f"FCF: Nalezeno přímo v info['freeCashflow']: ${fcf_info/1e9:.2f}B"
-            dbg.append(msg)
-            return float(fcf_info), dbg
-
-        # 2. Pokud není v info, jdeme počítat ručně z kvartálů
         qcf = getattr(t, "quarterly_cashflow", None)
-        if qcf is None or qcf.empty:
-            return None, ["FCF: Žádná data cashflow."]
+        if qcf is None or not isinstance(qcf, pd.DataFrame) or qcf.empty:
+            dbg.append("FCF: quarterly_cashflow není k dispozici (prázdné). Zkouším fallback.")
+            qcf = pd.DataFrame()
 
-        # Pomocná funkce na hledání řádků (protože se jmenují pokaždé jinak)
-        def get_row_val(df, candidates):
+        def _pick_row(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+            if df is None or df.empty:
+                return None
+            idx = set(map(str, df.index))
             for c in candidates:
-                if c in df.index:
-                    return df.loc[c]
+                if c in idx:
+                    return c
+            # zkus case-insensitive match
+            low_map = {str(i).strip().lower(): str(i) for i in df.index}
+            for c in candidates:
+                key = c.strip().lower()
+                if key in low_map:
+                    return low_map[key]
             return None
 
-        # Hledáme OCF (Operating Cash Flow)
-        ocf_series = get_row_val(qcf, [
-            "Operating Cash Flow", 
-            "Total Cash From Operating Activities",
-            "Net Cash Provided By Operating Activities" # Časté u PayPalu
-        ])
+        def _sorted_quarter_cols(df: pd.DataFrame) -> List[Any]:
+            cols = list(df.columns)
+            if not cols:
+                return []
+            dts = pd.to_datetime(cols, errors="coerce")
+            if dts.notna().any():
+                order = sorted(range(len(cols)), key=lambda i: dts[i], reverse=True)
+                return [cols[i] for i in order]
+            return cols  # fallback: keep original order
 
-        # Hledáme CapEx (Tady PayPal často padal)
-        capex_series = get_row_val(qcf, [
-            "Capital Expenditures", 
-            "Capital Expenditure", 
-            "Purchase Of PPE",
-            "Purchase Of Property, Plant, Equipment" 
-        ])
+        # 1) vyber poslední dostupné kvartály
+        cols_sorted = _sorted_quarter_cols(qcf)
+        cols_sel = cols_sorted[:4] if cols_sorted else []
+        if cols_sel:
+            dbg.append(f"FCF: Načítám kvartály: {', '.join([str(c) for c in cols_sel])}")
+        else:
+            dbg.append("FCF: Nenalezeny žádné kvartální sloupce v quarterly_cashflow.")
 
-        if ocf_series is not None:
-            # Pokud chybí CapEx (běžné u software/fintech), předpokládáme, že je malý/zahrnutý
-            if capex_series is None:
-                dbg.append("FCF: CapEx nenalezen (FinTech?), počítám FCF = OCF.")
-                fcf_quarters = ocf_series
-            else:
-                fcf_quarters = ocf_series - capex_series.abs()
+        # 2) primárně: přímý řádek Free Cash Flow
+        fcf_row = _pick_row(qcf, ["Free Cash Flow", "FreeCashFlow", "Free cash flow"])
+        used_method = None
 
-            # Sečteme poslední 4 kvartály
-            fcf_vals = pd.to_numeric(fcf_quarters, errors='coerce').dropna()
-            if len(fcf_vals) >= 4:
-                fcf_ttm = fcf_vals.iloc[:4].sum()
-            elif len(fcf_vals) > 0:
-                fcf_ttm = fcf_vals.mean() * 4.0 # Extrapolace
-            else:
-                return None, ["FCF: Data jsou samá NaN"]
+        fcf_quarters = None
+        non_null = 0
 
-            msg = f"FCF: Vypočteno z kvartálů: ${fcf_ttm/1e9:.2f}B"
-            dbg.append(msg)
-            return float(fcf_ttm), dbg
+        if fcf_row and cols_sel:
+            s = pd.to_numeric(qcf.loc[fcf_row, cols_sel], errors="coerce")
+            non_null = int(s.notna().sum())
+            if non_null > 0:
+                fcf_quarters = s
+                used_method = f"quarterly row '{fcf_row}'"
+        # 3) fallback: OCF - |CapEx|
+        if fcf_quarters is None and cols_sel:
+            ocf_row = _pick_row(qcf, [
+                "Operating Cash Flow",
+                "Total Cash From Operating Activities",
+                "Total Cash From Operating Activities (Continuing Operations)",
+                "Cash Flow From Continuing Operating Activities",
+                "Net Cash Provided By Operating Activities",
+            ])
+            capex_row = _pick_row(qcf, [
+                "Capital Expenditures",
+                "Capital Expenditure",
+                "CapitalExpenditures",
+                "Purchase Of PPE",
+                "Purchase of Property Plant Equipment",
+            ])
+            if ocf_row and capex_row:
+                ocf = pd.to_numeric(qcf.loc[ocf_row, cols_sel], errors="coerce")
+                capex = pd.to_numeric(qcf.loc[capex_row, cols_sel], errors="coerce")
+                non_null = int((ocf.notna() & capex.notna()).sum())
+                if non_null > 0:
+                    # CapEx bývá záporný; chceme: FCF = OCF - |CapEx|
+                    fcf_quarters = ocf - capex.abs()
+                    used_method = f"computed: '{ocf_row}' - |'{capex_row}'|"
 
-        return None, ["FCF: Nepodařilo se najít ani OCF."]
+        # 4) pokud pořád nic, fallback na annual cashflow / info
+        if fcf_quarters is None:
+            # annual cashflow
+            acf = getattr(t, "cashflow", None)
+            if isinstance(acf, pd.DataFrame) and not acf.empty:
+                acf_cols = _sorted_quarter_cols(acf)[:1]  # nejnovější rok
+                fcf_row_a = _pick_row(acf, ["Free Cash Flow", "FreeCashFlow", "Free cash flow"])
+                if fcf_row_a and acf_cols:
+                    v = safe_float(acf.loc[fcf_row_a, acf_cols[0]])
+                    if v is not None:
+                        dbg.append("FCF: Používám annual cashflow (nejnovější rok) – řádek Free Cash Flow.")
+                        used_method = "annual row 'Free Cash Flow'"
+                        fcf_ttm = float(v)
+                        msg = f"Použité roční FCF (TTM): ${fcf_ttm/1e9:.1f} miliard ({used_method})"
+                        dbg.append(msg)
+                        print(msg)
+                        return fcf_ttm, dbg
 
+            # last resort: info['freeCashflow']
+            try:
+                info = getattr(t, "info", None) or {}
+            except Exception:
+                info = {}
+            v = safe_float(info.get("freeCashflow"))
+            if v is not None:
+                used_method = "info['freeCashflow'] (fallback)"
+                fcf_ttm = float(v)
+                msg = f"Použité roční FCF (TTM): ${fcf_ttm/1e9:.1f} miliard ({used_method})"
+                dbg.append(msg)
+                print(msg)
+                return fcf_ttm, dbg
+
+            dbg.append("FCF: Nepodařilo se získat FCF ani z quarterly ani z annual ani z info.")
+            return None, dbg
+
+        # 5) TTM / extrapolace
+        fcf_vals = pd.to_numeric(fcf_quarters, errors="coerce").dropna()
+        n = int(fcf_vals.shape[0])
+        applied_extrap = False
+        used_sum4 = False
+
+        if n >= 4:
+            fcf_ttm = float(fcf_vals.iloc[:4].sum())
+            used_sum4 = True
+        elif n > 0:
+            # annualizace průměrem ×4
+            fcf_ttm = float(fcf_vals.mean() * 4.0)
+            applied_extrap = True
+        else:
+            dbg.append("FCF: kvartální hodnoty jsou všechny NaN.")
+            return None, dbg
+
+        # 6) Sanity check (market cap > 1T & FCF < 30B) -> 4×
+        mc = safe_float(market_cap)
+        if (not applied_extrap) and used_sum4 and mc and mc > 1e12 and fcf_ttm < 30e9:
+            fcf_ttm *= 4.0
+            dbg.append("FCF: Sanity check aktivován (MarketCap > $1T a FCF < $30B) -> násobím 4× (podezření na 1 kvartál).")
+
+        # 7) Debug zprávy
+        if used_method:
+            dbg.append(f"FCF metoda: {used_method}. Kvartály použity: {n}.")
+        if applied_extrap:
+            dbg.append(f"FCF: Extrapolace do roční báze (k dispozici {n} kvartály) -> průměr ×4.")
+        if used_sum4:
+            dbg.append("FCF: TTM = součet posledních 4 kvartálů.")
+
+        msg = f"Použité roční FCF (TTM): ${fcf_ttm/1e9:.1f} miliard"
+        dbg.append(msg)
+        print(msg)
+
+        return fcf_ttm, dbg
     except Exception as e:
-        return None, [f"FCF Error: {str(e)}"]
-
+        dbg.append(f"FCF: chyba při výpočtu TTM: {e}")
+        return None, dbg
+@st.cache_data(show_spinner=False, ttl=3600)
+def get_all_time_high(ticker: str) -> Optional[float]:
+    """Get all-time high price."""
+    try:
+        t = yf.Ticker(ticker)
+        h = t.history(period="max", interval="1d", auto_adjust=False)
+        if h is None or h.empty:
+            return None
+        col = "High" if "High" in h.columns else ("Close" if "Close" in h.columns else None)
+        if not col:
+            return None
+        return float(pd.to_numeric(h[col], errors="coerce").max())
+    except Exception:
+        return None
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
@@ -943,140 +981,175 @@ def fetch_peer_comparison(ticker: str, peers: List[str]) -> pd.DataFrame:
 # AI ANALYST (GEMINI)
 # ============================================================================
 
-def generate_ai_analyst_report(
-    ticker: str,
-    company: str,
-    metrics: Dict[str, Metric],
-    info: Dict[str, Any],
-    dcf_fair_value: Optional[float],
-    current_price: Optional[float],
-    scorecard: float,
-    insider_signal: Dict[str, Any],
-    macro_events: List[Dict[str, Any]]
-) -> Dict[str, Any]:
+def generate_ai_analyst_report(ticker: str, company: str, info: Dict, metrics: Dict, 
+                             dcf_fair_value: float, current_price: float, 
+                             scorecard: float, macro_events: List[Dict]) -> Dict:
     """
-    Generate comprehensive AI analyst report using Gemini.
-    
-    Returns:
-    {
-        "market_situation": str,
-        "bull_case": List[str],
-        "bear_case": List[str],
-        "verdict": str,
-        "wait_for_price": float,
-        "reasoning": str,
-        "confidence": str
-    }
+    Generuje analýzu pomocí Gemini (Verze: Ultimate Sector Logic).
+    Pokrývá: Tech, FinTech, Pharma, Reality, Komodity, Utility, Krypto a obecné firmy.
     """
-    
+    # 0. Kontrola API klíče
     if not GEMINI_API_KEY:
         return {
-            "market_situation": "AI analýza není dostupná (chybí Gemini API klíč)",
-            "bull_case": ["Nastavte GEMINI_API_KEY pro AI analýzu"],
-            "bear_case": [],
-            "verdict": "N/A",
-            "wait_for_price": None,
-            "reasoning": "Konfigurace AI chybí",
-            "confidence": "N/A"
+            "market_situation": "Chybí API klíč.",
+            "bull_case": [], "bear_case": [], "verdict": "N/A", 
+            "wait_for_price": 0.0, "reasoning": "Vložte Google AI Studio klíč.", "confidence": "LOW"
         }
-    # Prepare context
-    json_schema = """{
-      "market_situation": "Drsné shrnutí toho, co si trh myslí (např. 'Investoři panikaří, že AI vymaže jejich moat').",
-      "bull_case": ["Argument pro růst (např. 'AI nástroje zvednou efektivitu')"],
-      "bear_case": ["EXISTENCIÁLNÍ RIZIKO 1 (např. 'Sora nahradí video editor')", "RIZIKO 2"],
-      "verdict": "BUY/HOLD/SELL (podle poměru riziko/zisk)",
-      "wait_for_price": 0,
-      "reasoning": "Syntéza: Je strach z nahrazení přehnaný, nebo oprávněný?",
-      "confidence": "HIGH/MEDIUM/LOW"
-    }"""
-    # Prepare context (must escape JSON braces inside f-string!)
+
+    # 1. Normalizace vstupů (pro jistotu malá písmena)
+    sec = str(info.get("sector", "")).lower()
+    ind = str(info.get("industry", "")).lower()
+    tick = ticker.upper() # Pro detekci krypta podle tickeru
+
+    # 2. MASTER ROZCESTNÍK (8 Kategorií)
+
+    # A) KRYPTOMĚNY (BTC-USD, ETH-USD, COIN)
+    # Detekce: Ticker končí na -USD nebo sektor obsahuje 'crypto'
+    if "-USD" in tick or "crypto" in ind:
+        narrative_focus = """
+        ZAMĚŘENÍ (KRYPTO & DIGITAL ASSETS):
+        1. **Adopce:** Jde o reálné využití (ETF, platby), nebo jen spekulaci?
+        2. **Regulace:** Hrozí zákaz nebo přísná pravidla (SEC)?
+        3. **Cykly:** Jak se chová vůči halvingu a likviditě Fedu? (Ignoruj P/E a dividendy).
+        """
+
+    # B) ZDRAVOTNICTVÍ & BIOTECH (Pfizer, Eli Lilly)
+    elif "healthcare" in sec or "biotechnology" in ind or "drug" in ind:
+        narrative_focus = """
+        ZAMĚŘENÍ (HEALTHCARE):
+        1. **Patent Cliff:** Kdy vyprší patenty na klíčové léky?
+        2. **Pipeline:** Mají ve fázi 3 nové trháky, nebo je výzkum prázdný?
+        3. **Regulace cen:** Hrozí politický tlak na zlevnění léků?
+        """
+
+    # C) ENERGIE & KOMODITY (Exxon, Gold Miners)
+    elif "energy" in sec or "basic materials" in sec or "mining" in ind or "oil" in ind:
+        narrative_focus = """
+        ZAMĚŘENÍ (KOMODITY):
+        1. **Cena podkladu:** Je firma zisková, i když ropa/zlato klesne o 20%?
+        2. **Dividenda:** Je cash flow dost silné na udržení dividendy?
+        3. **Geopolitika:** Hrozí znárodnění dolů nebo uvalení windfall tax?
+        """
+
+    # D) UTILITY (ČEZ, Duke Energy, Voda)
+    elif "utilities" in sec:
+        narrative_focus = """
+        ZAMĚŘENÍ (UTILITY):
+        1. **Dluh:** Zvládají splácet obří dluh při aktuálních úrokových sazbách?
+        2. **Regulace:** Hrozí státní zásahy do cen energií (cenové stropy)?
+        3. **Dividenda:** Je to "Bond Proxy" (náhrada dluhopisu)? Je výnos bezpečný?
+        """
+
+    # E) REALITY & REITs (Realty Income, O)
+    elif "real estate" in sec or "reit" in ind:
+        narrative_focus = """
+        ZAMĚŘENÍ (REAL ESTATE / REITS):
+        1. **Refinancování:** Kdy jim končí fixace levných dluhů?
+        2. **Obsazenost:** Je poptávka po jejich typu budov (kanceláře = risk, sklady = boom)?
+        3. **FFO:** Hodnoť podle Funds From Operations, ne podle čistého zisku.
+        """
+
+    # F) FINTECH & BANKY (JPM, PayPal, Visa)
+    elif "financial" in sec or "bank" in ind or "payment" in ind:
+        narrative_focus = """
+        ZAMĚŘENÍ (FINANCE):
+        1. **Úvěrové riziko:** Rostou nesplácené půjčky?
+        2. **Disrupce (FinTech):** Ztrácí firma "moat" kvůli Apple Pay/Google Pay?
+        3. **Čistá úroková marže:** Jaký vliv mají sazby centrální banky?
+        """
+
+    # G) TECH & GROWTH (Nvidia, Google, Tesla)
+    elif "technology" in sec or "communication" in sec or "internet" in ind or "semiconductor" in ind:
+        narrative_focus = """
+        ZAMĚŘENÍ (BIG TECH & AI):
+        1. **AI Disrupce:**
+           - Je AI jejich produkt (Nvidia = Bull), nebo hrozba pro jejich produkt (Chegg/Adobe = Bear)?
+        2. **CapEx:** Utrácejí miliardy za čipy – vrátí se to?
+        3. **Valuace:** Je růst dostatečný pro ospravedlnění vysokého násobku?
+        """
+
+    # H) OSTATNÍ (Consumer Defensive, Retail, Průmysl)
+    else:
+        narrative_focus = """
+        ZAMĚŘENÍ (OBECNÉ / RETAIL / PRŮMYSL):
+        1. **Pricing Power:** Může firma přenést inflaci na zákazníka (zdražit)?
+        2. **Spotřebitel:** Slábne kupní síla zákazníků (recese)?
+        3. **Efektivita:** Jak zvládají náklady na práci a logistiku?
+        """
+
+    # 3. Sestavení Promptu
+    # Bezpečné získání P/E (pro krypto může chybět)
+    pe_val = metrics.get('pe').value if metrics.get('pe') else 'N/A'
+
     context = f"""
-Jsi brutálně upřímný seniorní hedge fond manažer. Analyzuj akcii {company} ({ticker}).
+    Jsi brutálně upřímný seniorní hedge fond manažer. Analyzuj akcii {company} ({tick}).
 
-AKTUÁLNÍ DATA:
-- Cena: {fmt_money(current_price)}
-- Férovka (DCF): {fmt_money(dcf_fair_value)} (Tvůj model)
-- Scorecard: {scorecard:.1f}/100
-- P/E: {fmt_num(metrics.get('pe').value if metrics.get('pe') else None)}
-- Sektor: {info.get('sector', 'N/A')}
+    ZÁKLADNÍ DATA:
+    - Cena: {fmt_money(current_price)}
+    - Férovka (DCF): {fmt_money(dcf_fair_value) if dcf_fair_value else 'N/A'} 
+    - Sektor: {sec} / {ind}
+    - P/E: {fmt_num(pe_val) if isinstance(pe_val, (int, float)) else 'N/A'}
 
-MAKRO & TRH:
-{chr(10).join([f"- {e.get('date','')}: {e.get('event','')}" for e in (macro_events or [])[:3]])}
+    MAKRO UDÁLOSTI:
+    {chr(10).join([f"- {e['date']}: {e['event']}" for e in macro_events[:2]])}
 
-INSTRUKCE PRO ANALÝZU (Kritické myšlení):
-1. Ignoruj marketingové řeči firmy. Soustřeď se na to, co ohrožuje její existenci.
-2. AI DISRUPCE: Pokud je firma v tech/software sektoru (např. Adobe, Google, Chegg), Tvým HLAVNÍM úkolem je analyzovat, zda Generativní AI může jejich produkt kompletně nahradit.
-   - Příklad Adobe: Hrozí, že nástroje jako Sora/Midjourney udělají z Photoshopu zbytečnost pro 90% lidí?
-   - Příklad Google: Hrozí, že ChatGPT/Perplexity zničí monopol vyhledávání?
-3. Pokud tržní cena padá (záporné MOS), vysvětli PROČ se trh bojí. Je to jen panika, nebo "konec éry"?
+    {narrative_focus}
 
-DŮLEŽITÉ:
-- Vrať POUZE validní JSON. Bez markdownu, bez ``` a bez jakéhokoli textu okolo.
-- Používej dvojité uvozovky pro stringy.
-- wait_for_price musí být číslo (nebo null).
+    INSTRUKCE:
+    Buď stručný. Hledej "Variant View". 
+    Nebuď alibista. Pokud je firma před krachem nebo disrupcí, napiš to.
 
-VÝSTUP JSON:
-{{
-  "market_situation": "Drsné shrnutí toho, co si trh myslí (např. 'Investoři panikaří, že AI vymaže jejich moat').",
-  "bull_case": ["Argument pro růst (např. 'AI nástroje zvednou efektivitu')"],
-  "bear_case": ["EXISTENCIÁLNÍ RIZIKO 1", "RIZIKO 2"],
-  "verdict": "BUY/HOLD/SELL",
-  "wait_for_price": null,
-  "reasoning": "Syntéza: Je strach z nahrazení přehnaný, nebo oprávněný?",
-  "confidence": "HIGH/MEDIUM/LOW"
-}}
-"""
+    VÝSTUP POUZE JSON:
+    {{
+      "market_situation": "Shrnutí sentimentu trhu jednou větou.",
+      "bull_case": ["Argument 1", "Argument 2"],
+      "bear_case": ["Riziko 1", "Riziko 2"],
+      "verdict": "BUY/HOLD/SELL",
+      "wait_for_price": <číslo_float_nebo_null>,
+      "reasoning": "Syntéza pro a proti.",
+      "confidence": "HIGH/MEDIUM/LOW"
+    }}
+    """
 
     try:
-        # Try new google-genai SDK first
-        try:
-            from google import genai
-            client = genai.Client(api_key=GEMINI_API_KEY)
-            response = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=context
-            )
-            result_text = response.text
-        except ImportError:
-            # Fallback to old SDK
-            import google.generativeai as genai
-            genai.configure(api_key=GEMINI_API_KEY)
+        # Volání API (podpora pro různé verze knihovny)
+        if GENAI_AVAILABLE:
             model = genai.GenerativeModel(GEMINI_MODEL)
+            response = model.generate_content(
+                context,
+                generation_config=genai.GenerationConfig(
+                    response_mime_type="application/json"
+                )
+            )
+            raw_text = response.text
+        else:
+            # Fallback
+            model = genai_old.GenerativeModel(GEMINI_MODEL)
             response = model.generate_content(context)
-            result_text = response.text
-        
-        # Parse JSON
-        # Remove markdown code blocks if present
-        result_text = (result_text or "")
-        result_text = re.sub(r"```json\s*", "", result_text, flags=re.IGNORECASE)
-        result_text = re.sub(r"```\s*", "", result_text)
-        result_text = result_text.strip()
+            raw_text = response.text
 
-        # Parse JSON robustly (Gemini sometimes returns extra text)
-        try:
-            return json.loads(result_text)
-        except Exception:
-            m = re.search(r"\{[\s\S]*\}", result_text)
-            if m:
-                candidate = m.group(0).strip()
-                return json.loads(candidate)
-            raise
+        # Clean JSON markdown if present
+        cleaned_text = re.sub(r"```json\n?|```", "", raw_text).strip()
+        data = json.loads(cleaned_text)
+
+        # Validace a doplnění chybějících klíčů
+        required = ["market_situation", "bull_case", "bear_case", "verdict", "wait_for_price"]
+        for k in required:
+            if k not in data:
+                data[k] = "N/A" if k != "wait_for_price" else current_price
+
+        return data
 
     except Exception as e:
         return {
-            "market_situation": f"AI analýza selhala: {str(e)[:200]}",
-            "bull_case": ["Chyba při generování"],
+            "market_situation": f"Chyba AI analýzy: {str(e)}",
+            "bull_case": [],
             "bear_case": [],
-            "verdict": "ERROR",
-            "wait_for_price": None,
-            "reasoning": "Technická chyba",
-            "confidence": "N/A"
+            "verdict": "HOLD",
+            "wait_for_price": current_price,
+            "reasoning": "Selhalo spojení s Gemini API.",
+            "confidence": "LOW"
         }
-
-
-# ============================================================================
-# CALENDAR & EVENTS
-# ============================================================================
 
 def get_earnings_calendar_estimate(ticker: str, info: Dict[str, Any]) -> Optional[dt.date]:
     """
@@ -1431,22 +1504,8 @@ def main():
     if "selected_ticker" not in st.session_state:
         st.session_state.selected_ticker = ""
 
-    if "force_tab_label" not in st.session_state:
-        st.session_state.force_tab_label = None
-
     if "close_sidebar_js" not in st.session_state:
         st.session_state.close_sidebar_js = False
-
-    # --- AI report state (per-ticker cache) ---
-    if "ai_reports" not in st.session_state:
-        st.session_state.ai_reports = {}  # { "AAPL": {...}, ... }
-    if "ai_report_current" not in st.session_state:
-        st.session_state.ai_report_current = None
-    if "ai_error_current" not in st.session_state:
-        st.session_state.ai_error_current = None
-    if "last_ai_ticker" not in st.session_state:
-        st.session_state.last_ai_ticker = None
-
 
     # Optional: hide sidebar overlay on mobile after analyze (keeps results visible)
     if st.session_state.get("sidebar_hidden"):
@@ -1718,13 +1777,6 @@ def main():
 # Process ticker
     ticker = (st.session_state.get("selected_ticker") or ticker_input) if analyze_btn else st.session_state.get("last_ticker", "AAPL")
     st.session_state["last_ticker"] = ticker
-
-    # Reset AI report view when ticker changes (avoid showing previous stock report)
-    if st.session_state.get("last_ai_ticker") != ticker:
-        st.session_state.last_ai_ticker = ticker
-        st.session_state.ai_report_current = None
-        st.session_state.ai_error_current = None
-
     
     # Fetch data
     with st.spinner(f"📊 Načítám data pro {ticker}..."):
@@ -1919,11 +1971,6 @@ def main():
         "📝 Memo & Watchlist",
         "🐦 Social & Guru"
     ])
-
-    # Keep user on the same tab after reruns triggered by button clicks
-    if st.session_state.get("force_tab_label"):
-        components.html(js_open_tab(st.session_state.force_tab_label), height=0, width=0)
-        st.session_state.force_tab_label = None
     
     # ------------------------------------------------------------------------
     # TAB 1: Overview
@@ -2066,7 +2113,6 @@ def main():
             st.info("🤖 Gemini AI je připraven vygenerovat hloubkovou analýzu")
             
             if st.button("🚀 Vygenerovat AI Report", use_container_width=True, type="primary"):
-                st.session_state.force_tab_label = "🤖 AI Analyst"
                 with st.spinner("🧠 AI analytik přemýšlí... (může trvat 10-20s)"):
                     ai_report = generate_ai_analyst_report(
                         ticker=ticker,
@@ -2080,13 +2126,11 @@ def main():
                         macro_events=MACRO_CALENDAR
                     )
                     
-                    st.session_state.ai_report_current = ai_report
-                    st.session_state.ai_reports[ticker] = ai_report
-                    st.session_state.ai_error_current = None
+                    st.session_state['ai_report'] = ai_report
             
-            # Display report for current ticker (avoid showing previous stock)
-            report = st.session_state.get('ai_report_current') or st.session_state.ai_reports.get(ticker)
-            if report:
+            # Display report if available
+            if 'ai_report' in st.session_state:
+                report = st.session_state['ai_report']
                 
                 # Market situation
                 st.markdown("### 🌐 Tržní situace")
@@ -2570,8 +2614,6 @@ def main():
             analyze_col1, analyze_col2 = st.columns([1, 3])
             with analyze_col1:
                 do_analyze = st.button("Analyzovat Sentiment", use_container_width=True, key="btn_analyze_social")
-                if do_analyze:
-                    st.session_state.force_tab_label = "🐦 Social & Guru"
             with analyze_col2:
                 st.caption("Použije Gemini (pokud je nastaven GEMINI_API_KEY).")
 
