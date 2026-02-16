@@ -134,6 +134,47 @@ def js_close_sidebar():
     </script>
     """
 
+def js_open_tab(tab_label: str) -> str:
+    """Return HTML+JS that selects a Streamlit tab by its visible label (best-effort)."""
+    safe_label = (tab_label or "").replace('"', '\"')
+    return f"""
+<script>
+(function() {{
+  const target = "{safe_label}".trim();
+  if (!target) return;
+
+  function getDoc() {{
+    try {{ return (window.parent && window.parent.document) ? window.parent.document : document; }}
+    catch (e) {{ return document; }}
+  }}
+
+  function clickTab() {{
+    const doc = getDoc();
+    const tabs = Array.from(doc.querySelectorAll('[role="tab"], button[role="tab"]'));
+    if (!tabs.length) return false;
+
+    const normalize = (s) => (s || '').replace(/\s+/g,' ').trim();
+    const wanted = normalize(target);
+
+    for (const t of tabs) {{
+      const label = normalize(t.innerText);
+      if (label === wanted || label.includes(wanted)) {{
+        try {{ t.click(); return true; }} catch (e) {{}}
+      }}
+    }}
+    return false;
+  }}
+
+  let tries = 0;
+  const timer = setInterval(() => {{
+    tries++;
+    if (clickTab() || tries > 20) clearInterval(timer);
+  }}, 120);
+}})();
+</script>
+"""
+
+
 def _get_secret(name: str, default: str = "") -> str:
     try:
         # Streamlit Cloud secrets
@@ -1017,9 +1058,8 @@ def generate_ai_analyst_report(
             "reasoning": "Konfigurace AI chybí",
             "confidence": "N/A"
         }
-    
     # Prepare context
-        context = f"""
+    context = f"""
 Jsi brutálně upřímný seniorní hedge fond manažer. Analyzuj akcii {company} ({ticker}).
 
 AKTUÁLNÍ DATA:
@@ -1446,6 +1486,9 @@ def main():
         st.session_state.ui_mode = "PICKER"
     if "selected_ticker" not in st.session_state:
         st.session_state.selected_ticker = ""
+
+    if "force_tab_label" not in st.session_state:
+        st.session_state.force_tab_label = None
 
     if "close_sidebar_js" not in st.session_state:
         st.session_state.close_sidebar_js = False
@@ -1914,6 +1957,11 @@ def main():
         "📝 Memo & Watchlist",
         "🐦 Social & Guru"
     ])
+
+    # Keep user on the same tab after reruns triggered by button clicks
+    if st.session_state.get("force_tab_label"):
+        components.html(js_open_tab(st.session_state.force_tab_label), height=0, width=0)
+        st.session_state.force_tab_label = None
     
     # ------------------------------------------------------------------------
     # TAB 1: Overview
@@ -2056,6 +2104,7 @@ def main():
             st.info("🤖 Gemini AI je připraven vygenerovat hloubkovou analýzu")
             
             if st.button("🚀 Vygenerovat AI Report", use_container_width=True, type="primary"):
+                st.session_state.force_tab_label = "🤖 AI Analyst"
                 with st.spinner("🧠 AI analytik přemýšlí... (může trvat 10-20s)"):
                     ai_report = generate_ai_analyst_report(
                         ticker=ticker,
@@ -2557,6 +2606,8 @@ def main():
             analyze_col1, analyze_col2 = st.columns([1, 3])
             with analyze_col1:
                 do_analyze = st.button("Analyzovat Sentiment", use_container_width=True, key="btn_analyze_social")
+                if do_analyze:
+                    st.session_state.force_tab_label = "🐦 Social & Guru"
             with analyze_col2:
                 st.caption("Použije Gemini (pokud je nastaven GEMINI_API_KEY).")
 
