@@ -197,7 +197,7 @@ except Exception:
 APP_NAME = "Stock Picker Pro"
 APP_VERSION = "v2.0"
 
-GEMINI_MODEL = "gemini-2.5-flash-lite"
+GEMINI_MODEL = "gemini-2.0-flash-exp"
 
 
 
@@ -1063,7 +1063,7 @@ def generate_ai_analyst_report(
       "reasoning": "Syntéza: Je strach z nahrazení přehnaný, nebo oprávněný?",
       "confidence": "HIGH/MEDIUM/LOW"
     }"""
-
+    # Prepare context (must escape JSON braces inside f-string!)
     context = f"""
 Jsi brutálně upřímný seniorní hedge fond manažer. Analyzuj akcii {company} ({ticker}).
 
@@ -1071,23 +1071,36 @@ AKTUÁLNÍ DATA:
 - Cena: {fmt_money(current_price)}
 - Férovka (DCF): {fmt_money(dcf_fair_value)} (Tvůj model)
 - Scorecard: {scorecard:.1f}/100
-- P/E: {fmt_num(metrics.get('pe').value)}
+- P/E: {fmt_num(metrics.get('pe').value if metrics.get('pe') else None)}
 - Sektor: {info.get('sector', 'N/A')}
 
 MAKRO & TRH:
-{chr(10).join([f"- {e['date']}: {e['event']}" for e in macro_events[:3]])}
+{chr(10).join([f"- {e.get('date','')}: {e.get('event','')}" for e in (macro_events or [])[:3]])}
 
 INSTRUKCE PRO ANALÝZU (Kritické myšlení):
-1. **Ignoruj marketingové řeči firmy.** Soustřeď se na to, co ohrožuje její existenci.
-2. **AI DISRUPCE:** Pokud je firma v tech/software sektoru (např. Adobe, Google, Chegg), Tvým HLAVNÍM úkolem je analyzovat, zda **Generativní AI může jejich produkt kompletně nahradit**.
-   - Příklad Adobe: "Hrozí, že nástroje jako Sora/Midjourney udělají z Photoshopu zbytečnost pro 90% lidí?"
-   - Příklad Google: "Hrozí, že ChatGPT/Perplexity zničí monopol vyhledávání?"
+1. Ignoruj marketingové řeči firmy. Soustřeď se na to, co ohrožuje její existenci.
+2. AI DISRUPCE: Pokud je firma v tech/software sektoru (např. Adobe, Google, Chegg), Tvým HLAVNÍM úkolem je analyzovat, zda Generativní AI může jejich produkt kompletně nahradit.
+   - Příklad Adobe: Hrozí, že nástroje jako Sora/Midjourney udělají z Photoshopu zbytečnost pro 90% lidí?
+   - Příklad Google: Hrozí, že ChatGPT/Perplexity zničí monopol vyhledávání?
 3. Pokud tržní cena padá (záporné MOS), vysvětli PROČ se trh bojí. Je to jen panika, nebo "konec éry"?
 
+DŮLEŽITÉ:
+- Vrať POUZE validní JSON. Bez markdownu, bez ``` a bez jakéhokoli textu okolo.
+- Používej dvojité uvozovky pro stringy.
+- wait_for_price musí být číslo (nebo null).
+
 VÝSTUP JSON:
-{json_schema}
+{{
+  "market_situation": "Drsné shrnutí toho, co si trh myslí (např. 'Investoři panikaří, že AI vymaže jejich moat').",
+  "bull_case": ["Argument pro růst (např. 'AI nástroje zvednou efektivitu')"],
+  "bear_case": ["EXISTENCIÁLNÍ RIZIKO 1", "RIZIKO 2"],
+  "verdict": "BUY/HOLD/SELL",
+  "wait_for_price": null,
+  "reasoning": "Syntéza: Je strach z nahrazení přehnaný, nebo oprávněný?",
+  "confidence": "HIGH/MEDIUM/LOW"
+}}
 """
-    
+
     try:
         # Try new google-genai SDK first
         try:
@@ -1110,10 +1123,19 @@ VÝSTUP JSON:
         # Remove markdown code blocks if present
         result_text = re.sub(r'```json\s*', '', result_text)
         result_text = re.sub(r'```\s*', '', result_text)
-        result_text = result_text.strip()
         
-        result = json.loads(result_text)
-        return result
+result_text = result_text.strip()
+
+# Parse JSON robustly (Gemini sometimes returns extra text)
+try:
+    return json.loads(result_text)
+except Exception:
+    # Try to extract the first JSON object from the text
+    m = re.search(r"\{[\s\S]*\}", result_text)
+    if m:
+        candidate = m.group(0).strip()
+        return json.loads(candidate)
+    raise
     
     except Exception as e:
         return {
@@ -1490,6 +1512,17 @@ def main():
     if "close_sidebar_js" not in st.session_state:
         st.session_state.close_sidebar_js = False
 
+    # --- AI report state (per-ticker cache) ---
+    if "ai_reports" not in st.session_state:
+        st.session_state.ai_reports = {}  # { "AAPL": {...}, ... }
+    if "ai_report_current" not in st.session_state:
+        st.session_state.ai_report_current = None
+    if "ai_error_current" not in st.session_state:
+        st.session_state.ai_error_current = None
+    if "last_ai_ticker" not in st.session_state:
+        st.session_state.last_ai_ticker = None
+
+
     # Optional: hide sidebar overlay on mobile after analyze (keeps results visible)
     if st.session_state.get("sidebar_hidden"):
         st.markdown("""
@@ -1760,6 +1793,13 @@ def main():
 # Process ticker
     ticker = (st.session_state.get("selected_ticker") or ticker_input) if analyze_btn else st.session_state.get("last_ticker", "AAPL")
     st.session_state["last_ticker"] = ticker
+
+    # Reset AI report view when ticker changes (avoid showing previous stock report)
+    if st.session_state.get("last_ai_ticker") != ticker:
+        st.session_state.last_ai_ticker = ticker
+        st.session_state.ai_report_current = None
+        st.session_state.ai_error_current = None
+
     
     # Fetch data
     with st.spinner(f"📊 Načítám data pro {ticker}..."):
@@ -2115,11 +2155,13 @@ def main():
                         macro_events=MACRO_CALENDAR
                     )
                     
-                    st.session_state['ai_report'] = ai_report
+                    st.session_state.ai_report_current = ai_report
+                    st.session_state.ai_reports[ticker] = ai_report
+                    st.session_state.ai_error_current = None
             
-            # Display report if available
-            if 'ai_report' in st.session_state:
-                report = st.session_state['ai_report']
+            # Display report for current ticker (avoid showing previous stock)
+            report = st.session_state.get('ai_report_current') or st.session_state.ai_reports.get(ticker)
+            if report:
                 
                 # Market situation
                 st.markdown("### 🌐 Tržní situace")
