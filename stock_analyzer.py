@@ -134,6 +134,44 @@ def js_close_sidebar():
     </script>
     """
 
+def js_open_tab(tab_label: str) -> str:
+    """Return HTML+JS that tries to re-select a Streamlit tab by its label (robust against emoji)."""
+    # Use JSON encoding to avoid quote escaping issues
+    target = json.dumps(tab_label)
+    return f"""
+<script>
+(function() {{
+  const target = {target};
+  function norm(s) {{
+    return (s || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9 ]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }}
+  const want = norm(target);
+  function tryClick() {{
+    const doc = window.parent.document;
+    const tabs = doc.querySelectorAll('[role="tab"], button[role="tab"]');
+    for (const t of tabs) {{
+      const txt = norm(t.innerText || t.textContent);
+      if (txt && (txt === want || txt.includes(want) || want.includes(txt))) {{
+        t.click();
+        return true;
+      }}
+    }}
+    return false;
+  }}
+  let tries = 0;
+  const timer = setInterval(() => {{
+    tries += 1;
+    if (tryClick() || tries > 25) clearInterval(timer);
+  }}, 200);
+}})();
+</script>
+"""
+
+
 def _get_secret(name: str, default: str = "") -> str:
     try:
         # Streamlit Cloud secrets
@@ -983,7 +1021,7 @@ def fetch_peer_comparison(ticker: str, peers: List[str]) -> pd.DataFrame:
 
 def generate_ai_analyst_report(ticker: str, company: str, info: Dict, metrics: Dict, 
                              dcf_fair_value: float, current_price: float, 
-                             scorecard: float, macro_events: List[Dict]) -> Dict:
+                             scorecard: float, macro_events: List[Dict], insider_signal: Any = None) -> Dict:
     """
     Generuje analýzu pomocí Gemini (Verze: Ultimate Sector Logic).
     Pokrývá: Tech, FinTech, Pharma, Reality, Komodity, Utility, Krypto a obecné firmy.
@@ -1496,6 +1534,8 @@ def estimate_smart_params(info: Dict[str, Any], metrics: Dict[str, "Metric"]) ->
     }
 
 def main():
+    if "force_tab_label" not in st.session_state:
+        st.session_state.force_tab_label = None
     """Main application entry point."""
 
     # --- UI mode state (picker vs results) ---
@@ -1971,6 +2011,12 @@ def main():
         "📝 Memo & Watchlist",
         "🐦 Social & Guru"
     ])
+
+# Keep user on the tab they clicked (Streamlit rerun otherwise jumps to first tab)
+if "force_tab_label" in st.session_state and st.session_state.force_tab_label:
+    components.html(js_open_tab(st.session_state.force_tab_label), height=0, width=0)
+    st.session_state.force_tab_label = None
+
     
     # ------------------------------------------------------------------------
     # TAB 1: Overview
@@ -2113,6 +2159,7 @@ def main():
             st.info("🤖 Gemini AI je připraven vygenerovat hloubkovou analýzu")
             
             if st.button("🚀 Vygenerovat AI Report", use_container_width=True, type="primary"):
+                st.session_state.force_tab_label = "🤖 AI Analyst"
                 with st.spinner("🧠 AI analytik přemýšlí... (může trvat 10-20s)"):
                     ai_report = generate_ai_analyst_report(
                         ticker=ticker,
