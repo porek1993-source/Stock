@@ -174,12 +174,15 @@ def js_open_tab(tab_label: str) -> str:
 
 
 def _get_secret(name: str, default: str = "") -> str:
+    """Centralizované a bezpečné načítání Secrets přes st.secrets.
+
+    Pozn.: Pro lokální běh použij .streamlit/secrets.toml (nedoporučujeme env fallback, aby
+    se v cloudu předešlo nechtěnému logování / úniku).
+    """
     try:
-        # Streamlit Cloud secrets
         return str(st.secrets.get(name, default) or default)
     except Exception:
-        # local env fallback
-        return str(os.getenv(name, default) or default)
+        return str(default or "")
 
 # Read from Streamlit secrets (preferred) or env.
 # In Streamlit Cloud > App settings > Secrets:
@@ -829,6 +832,114 @@ def _df_from_records(records: List[Dict[str, Any]], source: str) -> pd.DataFrame
     return df
 
 
+def _dedupe_insider_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Deduplicate merged insider transactions across providers.
+
+    Different providers may format the same trade slightly differently (whitespace, casing,
+    numeric types). This normalizes key fields, dedupes, and aggregates Source so you keep
+    provenance without double-counting.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame() if df is None else df
+
+    d = df.copy()
+
+    # Ensure expected columns exist
+    for col in ["Date", "Owner", "Code", "Shares", "Price", "Value", "Transaction", "Source", "Position", "Security", "FilingURL"]:
+        if col not in d.columns:
+            d[col] = None
+
+    # Normalize date to date
+    try:
+        d["Date"] = pd.to_datetime(d["Date"], errors="coerce").dt.date
+    except Exception:
+        pass
+
+    def _norm_text(x: Any) -> str:
+        try:
+            s = str(x) if x is not None else ""
+            s = re.sub(r"\s+", " ", s).strip()
+            return s
+        except Exception:
+            return ""
+
+    d["_owner_n"] = d["Owner"].apply(_norm_text).str.upper()
+    d["_code_n"] = d["Code"].apply(_norm_text).str.upper()
+    d["_tx_n"] = d["Transaction"].apply(_norm_text).str.lower()
+
+    # Numeric normalization
+    def _to_num(x: Any) -> Optional[float]:
+        try:
+            v = safe_float(x)
+            if v is None:
+                return None
+            if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                return None
+            return float(v)
+        except Exception:
+            return None
+
+    d["_shares_n"] = d["Shares"].apply(_to_num)
+    d["_price_n"] = d["Price"].apply(_to_num)
+    d["_value_n"] = d["Value"].apply(_to_num)
+
+    # Round to stabilize floating differences
+    d["_shares_r"] = d["_shares_n"].round(0)
+    d["_price_r"] = d["_price_n"].round(4)
+    d["_value_r"] = d["_value_n"].round(2)
+
+    # Build dedupe key
+    d["_key"] = (
+        d["Date"].astype(str)
+        + "|"
+        + d["_owner_n"]
+        + "|"
+        + d["_code_n"]
+        + "|"
+        + d["_tx_n"]
+        + "|"
+        + d["_shares_r"].astype(str)
+        + "|"
+        + d["_price_r"].astype(str)
+    )
+
+    def _join_sources(s: pd.Series) -> str:
+        vals = []
+        for x in s.dropna().tolist():
+            sx = _norm_text(x)
+            if sx:
+                vals.append(sx)
+        uniq = []
+        for v in vals:
+            if v not in uniq:
+                uniq.append(v)
+        return ", ".join(uniq) if uniq else ""
+
+    # Aggregate: keep first non-null for most fields, but join sources
+    agg = {
+        "Date": "first",
+        "Owner": "first",
+        "Position": "first",
+        "Code": "first",
+        "Security": "first",
+        "Shares": "first",
+        "Price": "first",
+        "Value": "first",
+        "Transaction": "first",
+        "FilingURL": "first",
+        "Source": _join_sources,
+    }
+
+    d2 = d.groupby("_key", dropna=False, as_index=False).agg(agg)
+
+    # Sort
+    try:
+        d2 = d2.sort_values("Date", ascending=False)
+    except Exception:
+        pass
+    return d2
+
+
 def _parse_fmp_company_outlook(payload: Any) -> pd.DataFrame:
     if not isinstance(payload, dict):
         return pd.DataFrame()
@@ -888,7 +999,7 @@ def _payload_to_records(payload: Any) -> Optional[List[Dict[str, Any]]]:
     return None
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
+@st.cache_data(show_spinner=False, ttl=21600)
 def _fetch_insider_from_alpha_vantage(ticker: str) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Free-ish alternative: Alpha Vantage Insider Transactions.
@@ -928,7 +1039,7 @@ def _fetch_insider_from_alpha_vantage(ticker: str) -> Tuple[pd.DataFrame, Dict[s
     return df, meta
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
+@st.cache_data(show_spinner=False, ttl=21600)
 def _fetch_insider_from_finnhub(ticker: str) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Alternative: Finnhub insider transactions.
@@ -967,7 +1078,7 @@ def _fetch_insider_from_finnhub(ticker: str) -> Tuple[pd.DataFrame, Dict[str, An
 
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
+@st.cache_data(show_spinner=False, ttl=21600)
 def _fetch_insider_from_api_ninjas(ticker: str) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Alternative: API Ninjas insider transactions.
@@ -1316,12 +1427,9 @@ def fetch_insider_transactions_multi(ticker: str) -> Tuple[Optional[pd.DataFrame
     except Exception:
         pass
 
-    # Deduplicate core identity fields
-    dedupe_cols = [c for c in ["Date", "Owner", "Code", "Shares", "Price", "Value", "Transaction"] if c in merged.columns]
-    if dedupe_cols:
-        merged = merged.drop_duplicates(subset=dedupe_cols, keep="first")
+    # Robust dedupe across providers (also aggregates Source so you keep provenance)
+    merged = _dedupe_insider_df(merged)
 
-    merged = merged.sort_values("Date", ascending=False)
 
     if len(sources_used) == 1:
         meta["chosen_source"] = sources_used[0]
@@ -1433,6 +1541,242 @@ def extract_metrics(info: Dict[str, Any], ticker: str) -> Dict[str, Metric]:
     }
     
     return metrics
+
+
+# ============================================================================
+# DATA ENRICHMENT ENGINE (MULTI-SOURCE)
+# ============================================================================
+
+def _maybe_pct(val: Optional[float]) -> Optional[float]:
+    """Normalize percent-like values into 0-1 when providers return 0-100."""
+    v = safe_float(val)
+    if v is None:
+        return None
+    # If it looks like 15 (=15%), normalize.
+    if abs(v) > 1.5 and abs(v) <= 100.0:
+        return v / 100.0
+    return v
+
+def _first_present(d: Dict[str, Any], keys: List[str]) -> Optional[float]:
+    for k in keys:
+        if k in d:
+            v = safe_float(d.get(k))
+            if v is not None:
+                return v
+    return None
+
+@st.cache_data(show_spinner=False, ttl=43200)
+def _fetch_fmp_ratios_ttm(ticker: str) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    meta = {"provider": "FMP", "endpoint": "api/v3/ratios-ttm", "status": None, "error": None, "url": None}
+    if not FMP_API_KEY:
+        meta["error"] = "FMP_API_KEY není nastaven."
+        return None, meta
+    url = f"https://financialmodelingprep.com/api/v3/ratios-ttm/{ticker}?apikey={FMP_API_KEY}"
+    meta["url"] = _redact_apikey(url)
+    status, payload, err = _http_get_json(url)
+    meta["status"] = status
+    meta["error"] = _extract_api_error(payload, err)
+    if status != 200:
+        return None, meta
+    if isinstance(payload, list) and payload:
+        if isinstance(payload[0], dict):
+            return payload[0], meta
+    if isinstance(payload, dict):
+        # sometimes wrapped
+        recs = payload.get("data") or payload.get("ratios") or payload.get("results")
+        if isinstance(recs, list) and recs and isinstance(recs[0], dict):
+            return recs[0], meta
+    return None, meta
+
+@st.cache_data(show_spinner=False, ttl=43200)
+def _fetch_fmp_key_metrics_ttm(ticker: str) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    meta = {"provider": "FMP", "endpoint": "api/v3/key-metrics-ttm", "status": None, "error": None, "url": None}
+    if not FMP_API_KEY:
+        meta["error"] = "FMP_API_KEY není nastaven."
+        return None, meta
+    url = f"https://financialmodelingprep.com/api/v3/key-metrics-ttm/{ticker}?apikey={FMP_API_KEY}"
+    meta["url"] = _redact_apikey(url)
+    status, payload, err = _http_get_json(url)
+    meta["status"] = status
+    meta["error"] = _extract_api_error(payload, err)
+    if status != 200:
+        return None, meta
+    if isinstance(payload, list) and payload:
+        if isinstance(payload[0], dict):
+            return payload[0], meta
+    if isinstance(payload, dict):
+        recs = payload.get("data") or payload.get("metrics") or payload.get("results")
+        if isinstance(recs, list) and recs and isinstance(recs[0], dict):
+            return recs[0], meta
+    return None, meta
+
+@st.cache_data(show_spinner=False, ttl=43200)
+def _fetch_alpha_overview(ticker: str) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    meta = {"provider": "AlphaVantage", "endpoint": "query?function=OVERVIEW", "status": None, "error": None, "url": None}
+    if not ALPHAVANTAGE_API_KEY:
+        meta["error"] = "ALPHAVANTAGE_API_KEY není nastaven."
+        return None, meta
+    url = f"https://www.alphavantage.co/query?function=OVERVIEW&symbol={ticker}&apikey={ALPHAVANTAGE_API_KEY}"
+    meta["url"] = _redact_apikey(url)
+    status, payload, err = _http_get_json(url)
+    meta["status"] = status
+    meta["error"] = _extract_api_error(payload, err)
+    if status != 200 or not isinstance(payload, dict) or not payload:
+        return None, meta
+    # AlphaVantage sometimes returns empty dict or an error note
+    if any(k in payload for k in ("Note", "Information", "Error Message")):
+        meta["error"] = _extract_api_error(payload, meta["error"] or "")
+        return None, meta
+    return payload, meta
+
+@st.cache_data(show_spinner=False, ttl=43200)
+def _fetch_finnhub_metric(ticker: str) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    meta = {"provider": "Finnhub", "endpoint": "api/v1/stock/metric?metric=all", "status": None, "error": None, "url": None}
+    if not FINNHUB_API_KEY:
+        meta["error"] = "FINNHUB_API_KEY není nastaven."
+        return None, meta
+    url = f"https://finnhub.io/api/v1/stock/metric?symbol={ticker}&metric=all&token={FINNHUB_API_KEY}"
+    meta["url"] = re.sub(r"(token=)[^&]+", r"\1***", url, flags=re.IGNORECASE)
+    status, payload, err = _http_get_json(url)
+    meta["status"] = status
+    meta["error"] = _extract_api_error(payload, err)
+    if status != 200 or not isinstance(payload, dict):
+        return None, meta
+    metric = payload.get("metric")
+    if isinstance(metric, dict) and metric:
+        return metric, meta
+    return None, meta
+
+def enrich_metrics_multisource(ticker: str, metrics: Dict[str, Metric], info: Dict[str, Any]) -> Tuple[Dict[str, Metric], Dict[str, Any]]:
+    """Enrich core fundamental metrics with robust fallback chain.
+
+    Fallback chain per requested spec:
+      1) yfinance (already in `metrics`)
+      2) FMP ratios-ttm + key-metrics-ttm
+      3) Alpha Vantage OVERVIEW
+      4) Finnhub metric
+
+    Only fills missing metrics and sets Metric.source to the provider used.
+    """
+    debug: Dict[str, Any] = {"ticker": ticker, "fills": {}, "steps": []}
+
+    def _set(key: str, val: Optional[float], src: str, pct: bool = False) -> None:
+        if key not in metrics:
+            return
+        if val is None:
+            return
+        v = _maybe_pct(val) if pct else safe_float(val)
+        if v is None:
+            return
+        metrics[key].value = v
+        metrics[key].source = src
+        debug["fills"][key] = src
+
+    def _is_missing(key: str) -> bool:
+        m = metrics.get(key)
+        if not m:
+            return True
+        v = safe_float(m.value)
+        if v is None:
+            return True
+        # For valuation/ratios, treat non-positive as missing
+        if key in {"pe", "peg", "pb", "ps", "ev_ebitda", "current_ratio", "quick_ratio", "debt_to_equity"} and v <= 0:
+            return True
+        return False
+
+    wanted = ["pe", "peg", "debt_to_equity", "operating_margin", "profit_margin", "gross_margin", "roe"]
+    if not any(_is_missing(k) for k in wanted):
+        debug["steps"].append("yfinance ok (no enrichment needed)")
+        return metrics, debug
+
+    # --- Step 2: FMP TTM ---
+    fmp_ratios, fmp_ratios_meta = (None, {})
+    fmp_km, fmp_km_meta = (None, {})
+    if FMP_API_KEY:
+        fmp_ratios, fmp_ratios_meta = _fetch_fmp_ratios_ttm(ticker)
+        fmp_km, fmp_km_meta = _fetch_fmp_key_metrics_ttm(ticker)
+        debug["steps"].append({"FMP_ratios_ttm": fmp_ratios_meta})
+        debug["steps"].append({"FMP_key_metrics_ttm": fmp_km_meta})
+
+        merged_fmp: Dict[str, Any] = {}
+        if isinstance(fmp_ratios, dict):
+            merged_fmp.update(fmp_ratios)
+        if isinstance(fmp_km, dict):
+            merged_fmp.update(fmp_km)
+
+        if merged_fmp:
+            if _is_missing("pe"):
+                _set("pe", _first_present(merged_fmp, ["peRatioTTM", "priceEarningsRatioTTM", "peTTM"]), "FMP")
+            if _is_missing("peg"):
+                _set("peg", _first_present(merged_fmp, ["pegRatioTTM", "pegTTM"]), "FMP")
+            if _is_missing("debt_to_equity"):
+                _set("debt_to_equity", _first_present(merged_fmp, ["debtEquityRatioTTM", "debtToEquityTTM", "debtToEquity"]), "FMP")
+            if _is_missing("operating_margin"):
+                _set("operating_margin", _first_present(merged_fmp, ["operatingProfitMarginTTM", "operatingMarginTTM", "operatingMarginsTTM"]), "FMP", pct=True)
+            if _is_missing("profit_margin"):
+                _set("profit_margin", _first_present(merged_fmp, ["netProfitMarginTTM", "profitMarginTTM", "profitMarginsTTM"]), "FMP", pct=True)
+            if _is_missing("gross_margin"):
+                _set("gross_margin", _first_present(merged_fmp, ["grossProfitMarginTTM", "grossMarginTTM", "grossMarginsTTM"]), "FMP", pct=True)
+            if _is_missing("roe"):
+                _set("roe", _first_present(merged_fmp, ["returnOnEquityTTM", "roeTTM", "returnOnEquity"]), "FMP", pct=True)
+
+    # --- Step 3: Alpha Vantage OVERVIEW ---
+    if any(_is_missing(k) for k in wanted) and ALPHAVANTAGE_API_KEY:
+        av, av_meta = _fetch_alpha_overview(ticker)
+        debug["steps"].append({"AlphaVantage_overview": av_meta})
+        if isinstance(av, dict) and av:
+            if _is_missing("pe"):
+                _set("pe", safe_float(av.get("PERatio")), "AlphaVantage")
+            if _is_missing("peg"):
+                _set("peg", safe_float(av.get("PEGRatio")), "AlphaVantage")
+            if _is_missing("operating_margin"):
+                _set("operating_margin", safe_float(av.get("OperatingMarginTTM")), "AlphaVantage", pct=True)
+            if _is_missing("profit_margin"):
+                _set("profit_margin", safe_float(av.get("ProfitMargin")), "AlphaVantage", pct=True)
+            if _is_missing("roe"):
+                _set("roe", safe_float(av.get("ReturnOnEquityTTM")), "AlphaVantage", pct=True)
+            if _is_missing("gross_margin"):
+                gp = safe_float(av.get("GrossProfitTTM"))
+                rev = safe_float(av.get("RevenueTTM"))
+                if gp is not None and rev not in (None, 0):
+                    _set("gross_margin", gp / rev, "AlphaVantage", pct=True)
+
+            if _is_missing("debt_to_equity"):
+                # AlphaVantage sometimes provides DebtToEquity or TotalDebt/TotalEquity
+                dte = safe_float(av.get("DebtToEquity"))
+                if dte is None:
+                    td = safe_float(av.get("TotalDebt"))
+                    te = safe_float(av.get("TotalShareholderEquity"))
+                    if td is not None and te not in (None, 0):
+                        dte = td / te
+                _set("debt_to_equity", dte, "AlphaVantage")
+
+    # --- Step 4: Finnhub metric ---
+    if any(_is_missing(k) for k in wanted) and FINNHUB_API_KEY:
+        fh, fh_meta = _fetch_finnhub_metric(ticker)
+        debug["steps"].append({"Finnhub_metric": fh_meta})
+        if isinstance(fh, dict) and fh:
+            if _is_missing("pe"):
+                _set("pe", _first_present(fh, ["peTTM", "peAnnual", "peExclExtraTTM"]), "Finnhub")
+            if _is_missing("peg"):
+                _set("peg", _first_present(fh, ["pegTTM", "pegAnnual"]), "Finnhub")
+            if _is_missing("roe"):
+                _set("roe", _first_present(fh, ["roeTTM", "roeAnnual"]), "Finnhub", pct=True)
+            if _is_missing("operating_margin"):
+                _set("operating_margin", _first_present(fh, ["operatingMarginTTM", "operatingMarginAnnual"]), "Finnhub", pct=True)
+            if _is_missing("profit_margin"):
+                _set("profit_margin", _first_present(fh, ["netMarginTTM", "netMarginAnnual", "profitMarginTTM"]), "Finnhub", pct=True)
+            if _is_missing("gross_margin"):
+                _set("gross_margin", _first_present(fh, ["grossMarginTTM", "grossMarginAnnual"]), "Finnhub", pct=True)
+            if _is_missing("debt_to_equity"):
+                _set("debt_to_equity", _first_present(fh, ["totalDebtToEquityTTM", "totalDebt/totalEquityTTM", "totalDebt/totalEquityAnnual", "totalDebtToEquityAnnual"]), "Finnhub")
+
+    # If still missing, keep as None; UI will show —
+    missing_left = [k for k in wanted if _is_missing(k)]
+    if missing_left:
+        debug["steps"].append({"missing_after_fallbacks": missing_left})
+
+    return metrics, debug
 
 
 def calculate_metric_score(metric: Metric) -> float:
@@ -1580,33 +1924,27 @@ def reverse_dcf_implied_growth(
 # ============================================================================
 
 def compute_insider_pro_signal(insider_df: Optional[pd.DataFrame]) -> Dict[str, Any]:
+    """Advanced insider trading signal with role weighting and cluster detection.
+
+    Key improvements:
+    - Robust classification using `Code` when available (P/S).
+    - Filters out non-informative transactions (option exercises, grants, tax withholding, gifts).
+    - Cluster buying boost cannot push signal below -100 (and won't amplify bearish signals).
+    - Returns both `cluster_detected` and `cluster_buying` for UI compatibility.
     """
-    Advanced insider trading signal with role weighting and cluster detection.
-    
-    Returns:
-    {
-        "signal": float (-100 to +100),
-        "label": str (Strong Buy / Buy / Neutral / Sell / Strong Sell),
-        "confidence": float (0-1),
-        "insights": List[str],
-        "recent_buys": int,
-        "recent_sells": int,
-        "cluster_detected": bool
-    }
-    """
-    
+
     if insider_df is None or insider_df.empty:
         return {
-            "signal": 0,
+            "signal": 0.0,
             "label": "Neutral",
             "confidence": 0.0,
             "insights": ["Žádné insider transakce k dispozici"],
             "recent_buys": 0,
             "recent_sells": 0,
-            "cluster_detected": False
+            "cluster_detected": False,
+            "cluster_buying": False,
         }
-    
-    # Role weights (CEO/CFO matter more)
+
     role_weights = {
         "ceo": 3.0,
         "chief executive officer": 3.0,
@@ -1618,75 +1956,125 @@ def compute_insider_pro_signal(insider_df: Optional[pd.DataFrame]) -> Dict[str, 
         "vice president": 1.2,
         "officer": 1.0,
     }
-    
-    # Analyze recent transactions (last 6 months)
+
     cutoff_date = dt.datetime.now() - dt.timedelta(days=180)
-    
+
     buy_signal = 0.0
     sell_signal = 0.0
     buy_count = 0
     sell_count = 0
-    buy_dates = []
-    sell_dates = []
-    
+    buy_dates: List[dt.datetime] = []
+    buy_owners: List[str] = []
+
+    def _norm(s: Any) -> str:
+        try:
+            return re.sub(r"\s+", " ", str(s or "")).strip().lower()
+        except Exception:
+            return ""
+
+    def _is_informative_code(code: str) -> bool:
+        # informative open-market trades are usually P (purchase) and S (sale)
+        # exclude common noise codes: A (grant/award), M (option exercise), F (tax withholding),
+        # G (gift), D (disposition other), etc.
+        return code in {"P", "S"}
+
     for _, row in insider_df.iterrows():
         try:
-            # Parse date
-            date_str = row.get("Start Date", row.get("Date", ""))
-            if pd.isna(date_str):
+            date_raw = row.get("Date") if "Date" in row else row.get("Start Date")
+            if date_raw is None or pd.isna(date_raw):
                 continue
-            
-            trans_date = pd.to_datetime(date_str)
-            if trans_date < cutoff_date:
+
+            trans_dt = pd.to_datetime(date_raw, errors="coerce")
+            if pd.isna(trans_dt) or trans_dt.to_pydatetime() < cutoff_date:
                 continue
-            
-            # Get transaction type
-            transaction = str(row.get("Transaction", "")).lower()
-            value = safe_float(row.get("Value", 0))
+
+            code = str(row.get("Code") or "").strip().upper()
+            tx_txt = _norm(row.get("Transaction"))
+
+            # Exclude obvious non-signal trades based on free-text notes
+            if any(k in tx_txt for k in ["tax", "withhold", "10b5", "10b5-1", "rule 10b5", "automatic"]):
+                continue
+
+            # Prefer numeric value; else compute from shares*price if possible
+            value = safe_float(row.get("Value"))
             if value is None:
-                value = 0
-            
-            # Get role weight
-            position = str(row.get("Position", "")).lower()
+                sh = safe_float(row.get("Shares"))
+                pr = safe_float(row.get("Price"))
+                if sh is not None and pr is not None:
+                    value = sh * pr
+                else:
+                    value = 0.0
+
+            position = _norm(row.get("Position"))
             weight = 1.0
             for role, w in role_weights.items():
                 if role in position:
                     weight = max(weight, w)
-            
-            # Classify transaction
-            if "buy" in transaction or "purchase" in transaction:
-                buy_signal += value * weight
+
+            # Determine buy/sell
+            is_buy = False
+            is_sell = False
+
+            if code:
+                if _is_informative_code(code):
+                    is_buy = (code == "P")
+                    is_sell = (code == "S")
+                else:
+                    # non-informative code -> ignore for signal counts
+                    continue
+            else:
+                # fallback heuristic
+                if any(k in tx_txt for k in ["buy", "purchase", "acquire"]):
+                    is_buy = True
+                elif any(k in tx_txt for k in ["sell", "sale", "dispose"]):
+                    is_sell = True
+
+            if is_buy:
+                buy_signal += float(value) * weight
                 buy_count += 1
-                buy_dates.append(trans_date)
-            elif "sell" in transaction or "sale" in transaction:
-                # Filter out tax-related sells
-                if "tax" not in transaction and "10b5-1" not in transaction:
-                    sell_signal += value * weight
-                    sell_count += 1
-                    sell_dates.append(trans_date)
-        
+                buy_dates.append(trans_dt.to_pydatetime())
+                buy_owners.append(str(row.get("Owner") or "").strip().upper())
+            elif is_sell:
+                sell_signal += float(value) * weight
+                sell_count += 1
+
         except Exception:
             continue
-    
-    # Detect cluster buying (multiple insiders buying within 30 days)
+
+    # Cluster buying: >=3 unique insiders buying within 30 days
     cluster_detected = False
-    if len(buy_dates) >= 3:
-        buy_dates_sorted = sorted(buy_dates)
-        for i in range(len(buy_dates_sorted) - 2):
-            if (buy_dates_sorted[i+2] - buy_dates_sorted[i]).days <= 30:
-                cluster_detected = True
-                break
-    
-    # Calculate signal (-100 to +100)
-    net_signal = buy_signal - sell_signal
-    max_signal = max(buy_signal + sell_signal, 1.0)
-    signal = (net_signal / max_signal) * 100
-    
-    # Boost for cluster buying
+    try:
+        if buy_dates and len(set([o for o in buy_owners if o])) >= 3:
+            paired = sorted([(d, o) for d, o in zip(buy_dates, buy_owners)], key=lambda x: x[0])
+            # sliding window over dates, count unique owners in window <= 30 days
+            for i in range(len(paired)):
+                start_d = paired[i][0]
+                owners_in_window = set()
+                for j in range(i, len(paired)):
+                    if (paired[j][0] - start_d).days > 30:
+                        break
+                    if paired[j][1]:
+                        owners_in_window.add(paired[j][1])
+                if len(owners_in_window) >= 3:
+                    cluster_detected = True
+                    break
+    except Exception:
+        cluster_detected = False
+
+    net = buy_signal - sell_signal
+    denom = max(buy_signal + sell_signal, 1.0)
+    signal = (net / denom) * 100.0
+
+    # Cluster buying boost should not amplify bearish signals
     if cluster_detected:
-        signal = min(100, signal * 1.3)
-    
-    # Determine label
+        if signal > 0:
+            signal *= 1.3
+        else:
+            signal *= 0.85
+
+    # Clamp to [-100, +100]
+    signal = max(-100.0, min(100.0, float(signal)))
+
     if signal >= 50:
         label = "Strong Buy"
     elif signal >= 20:
@@ -1697,23 +2085,21 @@ def compute_insider_pro_signal(insider_df: Optional[pd.DataFrame]) -> Dict[str, 
         label = "Sell"
     else:
         label = "Strong Sell"
-    
-    # Confidence based on transaction count and recency
+
     confidence = min(1.0, (buy_count + sell_count) / 10.0)
-    
-    # Generate insights
-    insights = []
+
+    insights: List[str] = []
     if buy_count > 0:
         insights.append(f"✅ {buy_count} insider nákupů v posledních 6 měsících")
     if sell_count > 0:
         insights.append(f"⚠️ {sell_count} insider prodejů v posledních 6 měsících")
     if cluster_detected:
-        insights.append(f"🔥 Cluster buying detekován - více insiderů nakupuje současně!")
+        insights.append("🔥 Cluster buying detekován - více insiderů nakupuje současně!")
     if signal > 30:
         insights.append(f"💪 Silný bullish signál od insiderů ({signal:.0f}/100)")
     elif signal < -30:
         insights.append(f"📉 Silný bearish signál od insiderů ({signal:.0f}/100)")
-    
+
     return {
         "signal": signal,
         "label": label,
@@ -1721,7 +2107,8 @@ def compute_insider_pro_signal(insider_df: Optional[pd.DataFrame]) -> Dict[str, 
         "insights": insights if insights else ["Žádné významné insider aktivity"],
         "recent_buys": buy_count,
         "recent_sells": sell_count,
-        "cluster_detected": cluster_detected
+        "cluster_detected": cluster_detected,
+        "cluster_buying": cluster_detected,
     }
 
 
@@ -2753,6 +3140,10 @@ def main():
         
         company = info.get("longName") or info.get("shortName") or ticker
         metrics = extract_metrics(info, ticker)
+        # Multi-source enrichment for core fundamentals (fills missing values + tracks sources)
+        metrics, metrics_enrich_dbg = enrich_metrics_multisource(ticker, metrics, info)
+        st.session_state["metrics_enrich_debug"] = metrics_enrich_dbg
+
         price_history = fetch_price_history(ticker, period="1y")
         income, balance, cashflow = fetch_financials(ticker)
         
@@ -2971,14 +3362,27 @@ def main():
             
             m1, m2 = st.columns(2)
             with m1:
-                st.metric("P/E", fmt_num(metrics["pe"].value if metrics.get("marketCap") else None))
-                st.metric("ROE", fmt_pct(metrics["roe"].value if metrics.get("marketCap") else None))
-                st.metric("Op. Margin", fmt_pct(metrics["operating_margin"].value if metrics.get("marketCap") else None))
+                st.metric("P/E", fmt_num(metrics.get("pe").value if metrics.get("pe") else None))
+                st.metric("ROE", fmt_pct(metrics.get("roe").value if metrics.get("roe") else None))
+                st.metric("Op. Margin", fmt_pct(metrics.get("operating_margin").value if metrics.get("operating_margin") else None))
             
             with m2:
-                st.metric("FCF Yield", fmt_pct(metrics["fcf_yield"].value if metrics.get("marketCap") else None))
-                st.metric("Debt/Equity", fmt_num(metrics["debt_to_equity"].value if metrics.get("marketCap") else None))
-                st.metric("Rev. Growth", fmt_pct(metrics["revenue_growth"].value if metrics.get("marketCap") else None))
+                st.metric("FCF Yield", fmt_pct(metrics.get("fcf_yield").value if metrics.get("fcf_yield") else None))
+                st.metric("Debt/Equity", fmt_num(metrics.get("debt_to_equity").value if metrics.get("debt_to_equity") else None))
+                st.metric("Rev. Growth", fmt_pct(metrics.get("revenue_growth").value if metrics.get("revenue_growth") else None))
+
+            with st.expander("🔧 Metrics debug", expanded=False):
+                mdbg = st.session_state.get("metrics_enrich_debug", None)
+                if isinstance(mdbg, dict):
+                    fills = mdbg.get("fills") or {}
+                    if fills:
+                        st.caption("Filled metrics (key → source):")
+                        st.json(fills)
+                    steps = mdbg.get("steps")
+                    if steps:
+                        st.caption("Fetch steps / provider statuses:")
+                        st.json(steps)
+
         
         # Price chart
         st.markdown("---")
