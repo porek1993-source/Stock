@@ -276,7 +276,16 @@ MACRO_CALENDAR = [
     {"date": "2026-03-25", "event": "US GDP (Q4 2025 Final)", "importance": "Medium"},
 ]
 
-
+@dataclass
+class Metric:
+    name: str
+    value: Optional[float]
+    min_val: Optional[float] = None
+    max_val: Optional[float] = None
+    target_below: Optional[float] = None
+    target_above: Optional[float] = None
+    weight: float = 1.0
+    source: str = "yfinance"
 
 # ============================================================================
 # UTILITIES & QUANT LOGIC
@@ -806,16 +815,6 @@ def fetch_insider_transactions_fmp(ticker: str) -> Optional[pd.DataFrame]:
 # METRICS & SCORING
 # ============================================================================
 
-@dataclass
-class Metric:
-    name: str
-    value: Optional[float]
-    min_val: Optional[float] = None
-    max_val: Optional[float] = None
-    target_below: Optional[float] = None
-    target_above: Optional[float] = None
-    weight: float = 1.0
-    source: str = "yfinance"
 
 
 def extract_metrics(info: Dict[str, Any], ticker: str) -> Dict[str, Metric]:
