@@ -35,18 +35,6 @@ APP_VERSION = "v1.0"
 
 # ---------------- Performance (Streamlit caching) ----------------
 # Cache policy notes:
-
-# ---------------- Bundled computation cache ----------------
-@st.cache_data(ttl=600, show_spinner=False)  # 10 min end-to-end bundle
-def _cached_bundle(ticker: str, period: str, interval: str, dcf_params: tuple):
-    """Return core data needed for the dashboard in one shot to avoid repeated network calls.
-    dcf_params: hashable tuple of key dcf inputs so cache invalidates when user changes settings.
-    """
-    info = _cached_yf_info(ticker)
-    hist = _cached_yf_history(ticker, period, interval)
-    news = _cached_yf_news(ticker)
-    return info, hist, news
-
 # - Prices/history: short TTL (market data changes often)
 # - Fundamentals/ratios: longer TTL
 # - News: short TTL
@@ -2024,84 +2012,35 @@ section[data-testid="stSidebar"] {display: none;}
     ensure_data_dir()
 
     st.markdown(f"# 📊 {APP_NAME} {APP_VERSION}")
+
     # Sidebar controls
     with st.sidebar:
-
-        st.caption("⚡ Performance")
-        colA, colB = st.columns(2)
-        with colA:
-            if st.button("Clear cache", key="btn_clear_cache"):
-                st.cache_data.clear()
-                st.success("Cache cleared.")
-        with colB:
-            if st.button("Refresh data", key="btn_refresh"):
-                # Bump a nonce to bypass caches that depend on it (bundle uses ttl; this forces rerun only)
-                st.session_state["refresh_nonce"] = st.session_state.get("refresh_nonce", 0) + 1
-                st.success("Refreshing…")
+    st.caption('⚡ Performance')
+    if st.button('Clear cache', key='btn_clear_cache'):
+        st.cache_data.clear()
+        st.success('Cache cleared. Rerun the app.')
 
         st.markdown("## Nastavení")
-
-        # Use a form so changing widgets doesn't rerun the whole app until submit
-        with st.form("sidebar_form", clear_on_submit=False):
-            ticker_input = st.text_input(
-                "Ticker",
-                value=st.session_state.get("ticker_input", st.session_state.get("ticker", "NVDA")),
-                key="ticker_input",
-            )
-
-            period = st.selectbox(
-                "Time frame",
-                options=["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "max"],
-                index=4,
-                key="period_sel",
-            )
-            interval = st.selectbox(
-                "Interval",
-                options=["5m", "15m", "30m", "1h", "1d", "1wk"],
-                index=["5m","15m","30m","1h","1d","1wk"].index(pick_interval(period)),
-                key="interval_sel",
-            )
-
-            # Optional: keep advanced settings in an expander to speed up initial render on mobile
-            with st.expander("DCF nastavení", expanded=False):
-                fcf_growth = st.number_input("FCF growth (%)", value=float(st.session_state.get("fcf_growth", 12.0)), step=0.5)
-                discount_rate = st.number_input("Discount rate / WACC (%)", value=float(st.session_state.get("discount_rate", 10.0)), step=0.5)
-                terminal_growth = st.number_input("Terminal growth (%)", value=float(st.session_state.get("terminal_growth", 3.0)), step=0.25)
-                use_exit_multiple = st.checkbox("Use exit multiple", value=bool(st.session_state.get("use_exit_multiple", False)))
-                exit_multiple = st.number_input("Exit multiple (EV/FCF)", value=float(st.session_state.get("exit_multiple", 25.0)), step=1.0)
-
-            show_debug = st.checkbox("Zobrazit debug info", value=bool(st.session_state.get("show_debug", False)))
-            submitted = st.form_submit_button("Apply")
-
-        if submitted:
-            st.session_state["ticker"] = (ticker_input or "").strip().upper() or "NVDA"
-            st.session_state["period"] = period
-            st.session_state["interval"] = interval
-            st.session_state["fcf_growth"] = float(fcf_growth)
-            st.session_state["discount_rate"] = float(discount_rate)
-            st.session_state["terminal_growth"] = float(terminal_growth)
-            st.session_state["use_exit_multiple"] = bool(use_exit_multiple)
-            st.session_state["exit_multiple"] = float(exit_multiple)
-            st.session_state["show_debug"] = bool(show_debug)
-            _hide_sidebar_once()
-
-
+        ticker = st.text_input("Ticker", value=st.session_state.get("ticker", "NVDA"), key="ticker", on_change=_hide_sidebar_once).strip().upper()
+        period = st.selectbox("Time frame", options=["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "max"], index=4)
+        interval = st.selectbox("Interval", options=["5m", "15m", "30m", "1h", "1d", "1wk"], index=["5m","15m","30m","1h","1d","1wk"].index(pick_interval(period)))
         st.markdown("---")
+        show_debug = st.checkbox("Zobrazit debug info", value=False)
         st.caption("Tip: delší time frame = stabilnější obrázek; kratší = lepší pro timing.")
 
-        if not ticker:
-            st.info("Zadej ticker.")
-            return
+    if not ticker:
+        st.info("Zadej ticker.")
+        return
 
-        # Fetch core data
-        info = fetch_ticker_info(ticker)
-        objects = fetch_ticker_objects(ticker)
-        hist = fetch_history(ticker, period=period, interval=interval)
+    # Fetch core data
+    info = fetch_ticker_info(ticker)
+    objects = fetch_ticker_objects(ticker)
+    hist = fetch_history(ticker, period=period, interval=interval)
 
-        metrics = compute_metrics(ticker, info, objects)
-        # Optional: enrich missing ratios with FMP (if FMP_API_KEY is set)
-        metrics, fmp_notes = enrich_metrics_with_fmp(ticker, metrics)
-        company = info.get("longName") or info.get("shortName") or ticker
+    metrics = compute_metrics(ticker, info, objects)
+    # Optional: enrich missing ratios with FMP (if FMP_API_KEY is set)
+    metrics, fmp_notes = enrich_metrics_with_fmp(ticker, metrics)
+    company = info.get("longName") or info.get("shortName") or ticker
 
     # DCF inputs
     with st.sidebar:
