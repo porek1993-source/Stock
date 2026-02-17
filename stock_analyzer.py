@@ -1122,49 +1122,89 @@ def generate_ai_analyst_report_with_retry(ticker: str, company: str, info: Dict,
 def generate_ai_analyst_report(ticker: str, company: str, info: Dict, metrics: Dict, 
                                dcf_fair_value: float, current_price: float, 
                                scorecard: float, macro_events: List[Dict], insider_signal: Any = None) -> Dict:
+    """
+    Generuje hloubkovou asymetrickou analýzu pomocí Gemini.
+    """
     if not GEMINI_API_KEY:
         return {"market_situation": "Chybí API klíč.", "verdict": "N/A"}
 
-    # Příprava dat pro asymetrický prompt
-    roic_val = calculate_roic(info)
+    # 1. URČENÍ JAZYKA (Pojistka proti vietnamštině)
+    target_lang = "ČEŠTINĚ" if st.session_state.get("language") == "cz" else "ANGLIČTINĚ"
+
+    # 2. PŘÍPRAVA DAT
+    roic_val = calculate_roic(info) 
     regime = detect_market_regime(fetch_price_history(ticker, "6mo"))
     debt_ebitda = safe_div(info.get("totalDebt"), info.get("ebitda"))
     fcf_yield_val = metrics.get("fcf_yield").value if metrics.get("fcf_yield") else 0
-# Určení jazyka pro AI
-target_lang = "ČEŠTINĚ" if st.session_state.get("language") == "cz" else "ANGLIČTINĚ"
-        
-   context = f"""
+
+    # 3. SESTAVENÍ PROMPTU (Tady byla ta chyba v odsazení)
+    context = f"""
 Jsi Seniorní Portfolio Manažer a Contrarian Analyst se specializací na ASYMETRICKÝ RISK/REWARD.
 DŮLEŽITÉ: Celou analýzu a všechny texty v JSON výstupu napiš v {target_lang}.
 
 VSTUPNÍ DATA:
-- Firma: {company} ({ticker}) | Sektor: {info.get('sector')}
-- Cena: {fmt_money(current_price)} | DCF Férovka: {fmt_money(dcf_fair_value)}
-- Metriky: ROIC: {fmt_pct(roic_val)}, Net Debt/EBITDA: {fmt_num(debt_ebitda)}, FCF Yield: {fmt_pct(fcf_yield_val)}
+- Aktiva: {company} ({ticker}) | Sektor: {info.get('sector')} / {info.get('industry')}
+- Tržní cena: {fmt_money(current_price)} | Kalkulovaná Férovka (DCF): {fmt_money(dcf_fair_value)}
+- Metriky: P/E: {info.get('trailingPE')}, ROIC: {fmt_pct(roic_val)}, Net Debt/EBITDA: {fmt_num(debt_ebitda)}, FCF Yield: {fmt_pct(fcf_yield_val)}
 - Tržní Režim: {regime}
-- Makro: {macro_events[:2]}
+- Makro události: {macro_events[:2]}
 
 TVŮJ ANALYTICKÝ RÁMEC (Chain-of-Thought):
-1. FUNDAMENTÁLNÍ PODLAHA: Jaká je reálná hodnota aktiv (Margin of Safety)?
-2. EMBEDDED OPTIONALITY: Co trh přehlíží (data, patenty, R&D)?
-3. RED TEAMING: Proč by Short Selleri tuto firmu zničili? (Buď brutální).
-4. ASYMETRIE: Je poměr Downside vs Upside aspoň 1:3?
+1. FUNDAMENTÁLNÍ PODLAHA: Je cena blízko hodnotě aktiv? Jak bezpečný je dluh?
+2. EMBEDDED OPTIONALITY: Má firma aktiva (data, patenty), která trh oceňuje nulou?
+3. RED TEAMING: Hraj roli Short Sellera. Proč tato firma za 2 roky ztratí 50 % hodnoty?
+4. ASYMETRIE: Je poměr mezi Downside a Upside alespoň 1:3?
 
 VÝSTUP POUZE JSON:
 {{
-  "asymmetry_score": (0-100),
-  "fundamental_floor": "Analýza bezpečnosti investice.",
-  "red_team_warning": "Největší fatální riziko investice.",
+  "asymmetry_score": (číslo 0-100),
+  "fundamental_floor": "Analýza bezpečnosti investice jednou větou.",
+  "red_team_warning": "BRUTÁLNĚ upřímná analýza největšího rizika - proč to nekoupit.",
   "bull_case": ["Argument 1", "Argument 2"],
   "bear_case": ["Riziko 1", "Riziko 2"],
   "verdict": "STRONGBUY/BUY/HOLD/SELL/AVOID",
-  "wait_for_price": {current_price * 0.9},
-  "risk_reward_ratio": "1:X",
-  "reasoning_synthesis": "Konečné zdůvodnění (Proč právě teď?).",
+  "wait_for_price": {current_price * 0.85 if current_price else 0},
+  "risk_reward_ratio": "Např. 1:4",
+  "reasoning_synthesis": "Konečný verdikt pro investiční komisi. Proč právě teď?",
   "confidence": "HIGH/MEDIUM/LOW"
 }}
 """
 
+    # 4. PARSOVÁNÍ JSONU
+    def _extract_json(text: str) -> Dict[str, Any]:
+        if not text: raise ValueError("Empty AI response")
+        cleaned = re.sub(r"```json\n?|```", "", str(text)).strip()
+        try:
+            return json.loads(cleaned)
+        except Exception:
+            m = re.search(r"\{[\s\S]*\}", cleaned)
+            if not m: raise
+            return json.loads(m.group(0))
+
+    # 5. VOLÁNÍ API
+    try:
+        raw_text = ""
+        try:
+            from google import genai as genai_new
+            client = genai_new.Client(api_key=GEMINI_API_KEY)
+            resp = client.models.generate_content(model=GEMINI_MODEL, contents=context)
+            raw_text = getattr(resp, "text", None) or str(resp)
+        except Exception:
+            import google.generativeai as genai_legacy
+            genai_legacy.configure(api_key=GEMINI_API_KEY)
+            model = genai_legacy.GenerativeModel(GEMINI_MODEL)
+            resp = model.generate_content(context)
+            raw_text = getattr(resp, "text", None) or str(resp)
+
+        return _extract_json(raw_text)
+
+    except Exception as e:
+        return {
+            "market_situation": f"Chyba AI: {str(e)}", 
+            "bull_case": [], "bear_case": [], 
+            "verdict": "HOLD", "wait_for_price": current_price
+        }
+        
 
 
     def _extract_json(text: str) -> Dict[str, Any]:
