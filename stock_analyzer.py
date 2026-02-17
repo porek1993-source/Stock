@@ -2015,39 +2015,15 @@ section[data-testid="stSidebar"] {display: none;}
 
     # Sidebar controls
     with st.sidebar:
+    st.caption('⚡ Performance')
+    if st.button('Clear cache', key='btn_clear_cache'):
+        st.cache_data.clear()
+        st.success('Cache cleared. Rerun the app.')
 
-st.caption("⚡ Performance")
-if st.button("Clear cache", key="btn_clear_cache"):
-    st.cache_data.clear()
-    st.success("Cache cleared. Rerun the app.")
-
-st.markdown("## Nastavení")
-
-def _on_ticker_change():
-    raw = st.session_state.get("ticker_input", "")
-    st.session_state["ticker"] = (raw or "").strip().upper() or "NVDA"
-    _hide_sidebar_once()
-
-# Use a separate widget key to avoid modifying st.session_state.ticker after instantiation
-st.text_input(
-    "Ticker",
-    value=st.session_state.get("ticker_input", st.session_state.get("ticker", "NVDA")),
-    key="ticker_input",
-    on_change=_on_ticker_change,
-)
-ticker = st.session_state.get("ticker", "NVDA")
-
-period = st.selectbox(
-    "Time frame",
-    options=["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "max"],
-    index=4,
-)
-interval = st.selectbox(
-    "Interval",
-    options=["5m", "15m", "30m", "1h", "1d", "1wk"],
-    index=["5m","15m","30m","1h","1d","1wk"].index(pick_interval(period)),
-)
-
+        st.markdown("## Nastavení")
+        ticker = st.text_input("Ticker", value=st.session_state.get("ticker", "NVDA"), key="ticker", on_change=_hide_sidebar_once).strip().upper()
+        period = st.selectbox("Time frame", options=["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "max"], index=4)
+        interval = st.selectbox("Interval", options=["5m", "15m", "30m", "1h", "1d", "1wk"], index=["5m","15m","30m","1h","1d","1wk"].index(pick_interval(period)))
         st.markdown("---")
         show_debug = st.checkbox("Zobrazit debug info", value=False)
         st.caption("Tip: delší time frame = stabilnější obrázek; kratší = lepší pro timing.")
