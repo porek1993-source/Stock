@@ -281,6 +281,44 @@ MACRO_CALENDAR = [
 # UTILITIES
 # ============================================================================
 
+def calculate_roic(info: Dict[str, Any]) -> Optional[float]:
+    """Výpočet ROIC pro AI prompt."""
+    try:
+        ebit = safe_float(info.get("ebitda")) 
+        nopat = ebit * 0.79 # 21% daň
+        invested_capital = (safe_float(info.get("totalDebt")) or 0) + (safe_float(info.get("totalStockholderEquity")) or 0)
+        return safe_div(nopat, invested_capital)
+    except: return None
+
+def detect_market_regime(price_history: pd.DataFrame) -> str:
+    """Detekce tržního režimu pro AI prompt."""
+    if price_history.empty: return "Stable"
+    returns = price_history['Close'].pct_change().dropna()
+    vol = returns.std() * math.sqrt(252)
+    return "High Volatility / Bear" if vol > 0.25 else "Low Volatility / Bull"
+    
+def calculate_roic(info: Dict[str, Any]) -> Optional[float]:
+    """Aproximace ROIC z dostupných dat yfinance."""
+    try:
+        ebit = safe_float(info.get("ebitda")) # EBITDA jako proxy pro EBIT
+        tax_rate = 0.21 # Standardní US tax
+        nopat = ebit * (1 - tax_rate) if ebit else None
+        invested_capital = (safe_float(info.get("totalDebt")) or 0) + (safe_float(info.get("totalStockholderEquity")) or 0)
+        return safe_div(nopat, invested_capital)
+    except:
+        return None
+
+def detect_market_regime(price_history: pd.DataFrame) -> str:
+    """Jednoduchá detekce režimu (HMM-lite) pro prompt."""
+    if price_history.empty: return "Unknown"
+    returns = price_history['Close'].pct_change().dropna()
+    vol = returns.std() * math.sqrt(252)
+    avg_ret = returns.mean() * 252
+    
+    if vol > 0.25 and avg_ret < 0: return "High Volatility / Bear"
+    if vol < 0.15 and avg_ret > 0: return "Low Volatility / Bull"
+    return "Stable / Neutral"
+    
 def ensure_data_dir() -> None:
     os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -1199,34 +1237,49 @@ def generate_ai_analyst_report(ticker: str, company: str, info: Dict, metrics: D
     pe_val = metrics.get("marketCap").value if metrics.get("marketCap") else 'N/A'
 
     context = f"""
-    Jsi brutálně upřímný seniorní hedge fond manažer. Analyzuj akcii {company} ({tick}).
+Jsi Seniorní Portfolio Manažer a Contrarian Analyst se specializací na asymetrický risk/reward a strategii QARP. 
+Tvým cílem není shoda s trhem, ale identifikace situací s omezeným downside a exponenciálním upside.
+Jsi cynický, alergický na korporátní PR a hledáš "value traps".
 
-    ZÁKLADNÍ DATA:
-    - Cena: {fmt_money(current_price)}
-    - Férovka (DCF): {fmt_money(dcf_fair_value) if dcf_fair_value else 'N/A'} 
-    - Sektor: {sec} / {ind}
-    - P/E: {fmt_num(pe_val) if isinstance(pe_val, (int, float)) else 'N/A'}
+VSTUPNÍ DATA:
+- Aktiva: {company} ({tick}) | Sektor: {sec} / {ind}
+- Tržní cena: {fmt_money(current_price)}
+- Kalkulovaná Férová Hodnota (DCF): {fmt_money(dcf_fair_value) if dcf_fair_value else 'N/A'}
+- Klíčové Metriky: P/E: {pe_val}, ROIC: {roic}%, Net Debt/EBITDA: {debt_ebitda}x, FCF Yield: {fcf_yield}%
+- Tržní Režim (HMM): {market_regime} (např. High Volatility / Bear)
+- Makro Kontext: {macro_summary}
 
-    MAKRO UDÁLOSTI:
-    {chr(10).join([f"- {e['date']}: {e['event']}" for e in macro_events[:2]])}
+TVŮJ ANALYTICKÝ RÁMEC (Chain-of-Thought):
+1. FUNDAMENTÁLNÍ PODLAHA: Je cena blízko likvidační hodnoty nebo čisté hotovosti? Jak bezpečný je dluh?
+2. EMBEDDED OPTIONALITY: Má firma aktiva (data, R&D, značku), která trh oceňuje nulou?
+3. RED TEAMING: Hraj roli Short Sellera. Proč tato firma za 2 roky zkrachuje nebo ztratí 50% hodnoty? 
+4. ASYMETRIE: Je poměr mezi nejhorším scénářem a nejlepším scénářem alespoň 1:3?
 
-    {narrative_focus}
+INSTRUKCE PRO VÝSTUP:
+- Buď brutálně upřímný. Ignoruj "analytický konsenzus" na Wall Street.
+- Bull/Bear case musí obsahovat kauzalitu (pokud se stane A, ovlivní to marže o B).
+- Výstup musí být validní JSON.
 
-    INSTRUKCE:
-    Proveď HLOUBKOVOU, CYNICKOU analýzu. Každý bod v Bull a Bear case musí mít minimálně 2-3 věty vysvětlující hlubší souvislosti (např. vliv na marže, tržní podíl, cash flow). 
-    Nebuď alibista. Pokud je firma před krachem nebo disrupcí, napiš to.
-
-    VÝSTUP POUZE JSON:
-    {{
-      "market_situation": "Shrnutí sentimentu trhu jednou větou.",
-      "bull_case": ["Argument 1", "Argument 2"],
-      "bear_case": ["Riziko 1", "Riziko 2"],
-      "verdict": "BUY/HOLD/SELL",
-      "wait_for_price": <POVINNĚ konkrétní číslo - pokud předražené, navrhni 15% discount k fair value; pokud podhodnocené, navrhni aktuální cenu>,
-      "reasoning": "Syntéza pro a proti.",
-      "confidence": "HIGH/MEDIUM/LOW"
-    }}
-    """
+VÝSTUPNÍ FORMÁT:
+{{
+  "asymmetry_score": (0-100, kde 100 je dokonalá asymetrie),
+  "market_situation_context": "Jedna věta propojující sentiment a aktuální tržní režim.",
+  "fundamental_floor": "Analýza bezpečnosti investice (Margin of Safety).",
+  "bull_case": [
+    "Argument 1: Specifický katalyzátor a jeho dopad na FCF.",
+    "Argument 2: Proč trh podceňuje embedded optionality."
+  ],
+  "bear_case": [
+    "Riziko 1: Scénář 'Red Team' - co zničí investiční tezi.",
+    "Riziko 2: Strukturální hrozba (disrupce, dluh, úzké marže)."
+  ],
+  "verdict": "STRONGBUY / BUY / HOLD / SELL / AVOID",
+  "wait_for_price": <Konkrétní číslo založené na 15-20% Margin of Safety k DCF nebo aktuální cena při vysoké asymetrii>,
+  "risk_reward_ratio": "Např. 1:4",
+  "reasoning_synthesis": "Konečný verdikt pro investiční komisi. Proč právě teď?",
+  "confidence": "HIGH/MEDIUM/LOW"
+}}
+"""
 
 
     def _extract_json(text: str) -> Dict[str, Any]:
@@ -2363,20 +2416,22 @@ def main():
     # ------------------------------------------------------------------------
     # TAB 3: AI Analyst Report
     # ------------------------------------------------------------------------
+# ------------------------------------------------------------------------
+    # TAB 3: AI Analyst Report (ASIMETRICKÁ VERZE 4.0)
+    # ------------------------------------------------------------------------
     with tabs[2]:
-        st.markdown('<div class="section-header">🤖 AI Analytik - Hloubkový Report</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-header">🤖 AI Analytik - Asymetrický Risk/Reward Report</div>', unsafe_allow_html=True)
         
         if not GEMINI_API_KEY:
             st.warning("⚠️ **AI analýza není dostupná**")
-            st.info("Nastav GEMINI_API_KEY v kódu pro aktivaci AI analytika.")
+            st.info("Nastav GEMINI_API_KEY v secrets pro aktivaci AI analytika.")
         else:
-            st.info("🤖 Gemini AI je připraven vygenerovat hloubkovou analýzu")
-            
-            if st.button("🚀 Vygenerovat AI Report", use_container_width=True, type="primary"):
+            # Tlačítko pro spuštění analýzy
+            if st.button("🚀 Vygenerovat Asymetrický Report", use_container_width=True, type="primary"):
                 st.session_state.force_tab_label = "🤖 AI Analyst"
-                # Clear old report
                 st.session_state.ai_report_ticker = None
-                with st.spinner("🧠 AI analytik přemýšlí... (může trvat 10-20s, retry logic aktivní)"):
+                
+                with st.spinner("🧠 Seniorní manažer analyzuje asymetrii trhu..."):
                     ai_report = generate_ai_analyst_report_with_retry(
                         ticker=ticker,
                         company=company,
@@ -2385,54 +2440,73 @@ def main():
                         dcf_fair_value=fair_value_dcf,
                         current_price=current_price,
                         scorecard=scorecard,
-                        insider_signal=insider_signal,
-                        macro_events=MACRO_CALENDAR
+                        macro_events=MACRO_CALENDAR,
+                        insider_signal=insider_signal
                     )
                     
                     st.session_state['ai_report'] = ai_report
                     st.session_state.ai_report_ticker = ticker
-            
-            # Display report if available
-            if 'ai_report' in st.session_state:
+
+            # --- ZOBRAZENÍ VÝSLEDKŮ ---
+            if 'ai_report' in st.session_state and st.session_state.ai_report_ticker == ticker:
                 report = st.session_state['ai_report']
                 
-                # Market situation
-                st.markdown("### 🌐 Tržní situace")
-                st.write(report.get('market_situation', 'N/A'))
+                # 1. Gauge Chart (Ukazatel asymetrie)
+                import plotly.graph_objects as go
+                score = report.get("asymmetry_score", 50)
                 
-                # Bull/Bear cases
+                fig = go.Figure(go.Indicator(
+                    mode = "gauge+number",
+                    value = score,
+                    title = {'text': "Asymmetry Score", 'font': {'size': 20}},
+                    gauge = {
+                        'axis': {'range': [0, 100], 'tickwidth': 1},
+                        'bar': {'color': "#00ff88" if score > 70 else "#ffaa00"},
+                        'steps': [
+                            {'range': [0, 30], 'color': "rgba(255, 68, 68, 0.2)"},
+                            {'range': [30, 70], 'color': "rgba(255, 170, 0, 0.2)"},
+                            {'range': [70, 100], 'color': "rgba(0, 255, 136, 0.2)"}
+                        ],
+                        'threshold': {'line': {'color': "white", 'width': 4}, 'thickness': 0.75, 'value': score}
+                    }
+                ))
+                fig.update_layout(height=280, margin=dict(l=20, r=20, t=40, b=20), paper_bgcolor='rgba(0,0,0,0)', font={'color': "white"})
+                st.plotly_chart(fig, use_container_width=True)
+
+                # 2. RED TEAM WARNING BOX
+                st.markdown(f"""
+                    <div style="background-color: rgba(255, 68, 68, 0.1); border: 2px solid #ff4444; padding: 20px; border-radius: 10px; margin-bottom: 25px;">
+                        <h3 style="color: #ff4444; margin-top: 0; font-size: 1.2rem;">🚨 RED TEAM WARNING</h3>
+                        <p style="font-style: italic; color: #ffcccc; margin-bottom: 0;">{report.get('red_team_warning', 'N/A')}</p>
+                    </div>
+                """, unsafe_allow_html=True)
+
+                # 3. Bull & Bear Case Sloupce
                 col1, col2 = st.columns(2)
-                
                 with col1:
-                    st.markdown("### 🐂 Bull Case")
+                    st.markdown("### 🐂 Bull Case (Upside)")
                     for item in report.get('bull_case', []):
                         st.write(f"✅ {item}")
                 
                 with col2:
-                    st.markdown("### 🐻 Bear Case")
+                    st.markdown("### 🐻 Bear Case (Downside)")
                     for item in report.get('bear_case', []):
                         st.write(f"⚠️ {item}")
-                
-                # Verdict
+
+                # 4. Syntéza a detaily
                 st.markdown("---")
-                st.markdown("### 🎯 Verdikt AI")
+                st.markdown(f"**🛡️ Fundamentální podlaha:** {report.get('fundamental_floor', 'N/A')}")
+                st.info(f"**🎯 Strategická syntéza:** {report.get('reasoning_synthesis', 'N/A')}")
                 
+                # Spodní řada metrik
                 v_col1, v_col2, v_col3 = st.columns(3)
-                
                 with v_col1:
-                    ai_verdict = report.get('verdict', 'N/A')
-                    verdict_emoji = "🟢" if ai_verdict == "BUY" else ("🟡" if ai_verdict == "HOLD" else "🔴")
-                    st.metric("Doporučení", f"{verdict_emoji} {ai_verdict}")
-                
+                    verdict = report.get('verdict', 'N/A')
+                    st.metric("Finální verdikt", verdict)
                 with v_col2:
-                    wait_price = report.get("marketCap")
-                    st.metric("Wait for Price", fmt_money(wait_price) if wait_price else "N/A")
-                
+                    st.metric("Risk/Reward Ratio", report.get('risk_reward_ratio', 'N/A'))
                 with v_col3:
                     st.metric("Confidence", report.get('confidence', 'N/A'))
-                
-                st.markdown("#### 💭 Zdůvodnění")
-                st.write(report.get('reasoning', 'N/A'))
     
     # ------------------------------------------------------------------------
     # TAB 4: Peer Comparison
