@@ -2301,61 +2301,100 @@ def main():
 # ------------------------------------------------------------------------
     # TAB 3: AI Analyst Report (ASIMETRICKÁ VERZE 4.0)
     # ------------------------------------------------------------------------
+   # ------------------------------------------------------------------------
+    # TAB 3: AI Analyst Report (ASIMETRICKÁ VERZE 4.0)
+    # ------------------------------------------------------------------------
     with tabs[2]:
         st.markdown('<div class="section-header">🤖 AI Analytik & Asymetrie</div>', unsafe_allow_html=True)
         
-        # Tlačítko pro výpočet (ponecháno z tvého kódu)
-        if st.button("🚀 Vygenerovat Asymetrický Report", use_container_width=True, type="primary"):
-            # ... (zde proběhne volání funkce generate_ai_analyst_report_with_retry) ...
-            pass
+        if not GEMINI_API_KEY:
+            st.warning("⚠️ **AI analýza není dostupná**")
+            st.info("Nastav GEMINI_API_KEY v secrets pro aktivaci AI analytika.")
+        else:
+            # OPRAVENÉ TLAČÍTKO: Teď už skutečně volá funkci
+            if st.button("🚀 Vygenerovat Asymetrický Report", use_container_width=True, type="primary"):
+                st.session_state.force_tab_label = "🤖 AI Analyst"
+                st.session_state.ai_report_ticker = None
+                
+                with st.spinner("🧠 Seniorní manažer analyzuje asymetrii trhu..."):
+                    # Volání tvé retry funkce
+                    ai_report = generate_ai_analyst_report_with_retry(
+                        ticker=ticker,
+                        company=company,
+                        metrics=metrics,
+                        info=info,
+                        dcf_fair_value=fair_value_dcf,
+                        current_price=current_price,
+                        scorecard=scorecard,
+                        macro_events=MACRO_CALENDAR,
+                        insider_signal=insider_signal
+                    )
+                    
+                    # Uložení výsledku do session_state
+                    st.session_state['ai_report'] = ai_report
+                    st.session_state.ai_report_ticker = ticker
+                    st.rerun() # Refresh pro zobrazení výsledků
 
-        if 'ai_report' in st.session_state and st.session_state.ai_report_ticker == ticker:
-            report = st.session_state['ai_report']
-            
-            # --- ASYMMETRY GAUGE ---
-            import plotly.graph_objects as go
-            score = report.get("asymmetry_score", 50)
-            fig = go.Figure(go.Indicator(
-                mode = "gauge+number",
-                value = score,
-                title = {'text': "Asymmetry Score (Potential)", 'font': {'size': 20}},
-                gauge = {
-                    'axis': {'range': [0, 100]},
-                    'bar': {'color': "#00ff88" if score > 70 else "#ffaa00"},
-                    'steps': [
-                        {'range': [0, 30], 'color': "rgba(255, 68, 68, 0.2)"},
-                        {'range': [70, 100], 'color': "rgba(0, 255, 136, 0.2)"}
-                    ]
-                }
-            ))
-            fig.update_layout(height=280, margin=dict(l=20, r=20, t=40, b=20), paper_bgcolor='rgba(0,0,0,0)', font={'color': "white"})
-            st.plotly_chart(fig, use_container_width=True)
+            # --- ZOBRAZENÍ VÝSLEDKŮ ---
+            if 'ai_report' in st.session_state and st.session_state.ai_report_ticker == ticker:
+                report = st.session_state['ai_report']
+                
+                # 1. Gauge Chart (Ukazatel asymetrie)
+                import plotly.graph_objects as go
+                score = report.get("asymmetry_score", 50)
+                
+                fig = go.Figure(go.Indicator(
+                    mode = "gauge+number",
+                    value = score,
+                    title = {'text': "Asymmetry Score", 'font': {'size': 20}},
+                    gauge = {
+                        'axis': {'range': [0, 100], 'tickwidth': 1},
+                        'bar': {'color': "#00ff88" if score > 70 else "#ffaa00"},
+                        'steps': [
+                            {'range': [0, 30], 'color': "rgba(255, 68, 68, 0.2)"},
+                            {'range': [30, 70], 'color': "rgba(255, 170, 0, 0.2)"},
+                            {'range': [70, 100], 'color': "rgba(0, 255, 136, 0.2)"}
+                        ],
+                        'threshold': {'line': {'color': "white", 'width': 4}, 'thickness': 0.75, 'value': score}
+                    }
+                ))
+                fig.update_layout(height=280, margin=dict(l=20, r=20, t=40, b=20), paper_bgcolor='rgba(0,0,0,0)', font={'color': "white"})
+                st.plotly_chart(fig, use_container_width=True)
 
-            # --- RED TEAM WARNING BOX ---
-            st.markdown(f"""
-                <div style="background-color: rgba(255, 68, 68, 0.1); border: 2px solid #ff4444; padding: 20px; border-radius: 10px; margin-bottom: 25px;">
-                    <h3 style="color: #ff4444; margin-top: 0;">🚨 RED TEAM ATTACK</h3>
-                    <p style="font-style: italic; color: #ffcccc;">{report.get('red_team_warning', 'N/A')}</p>
-                </div>
-            """, unsafe_allow_html=True)
+                # 2. RED TEAM WARNING BOX
+                st.markdown(f"""
+                    <div style="background-color: rgba(255, 68, 68, 0.1); border: 2px solid #ff4444; padding: 20px; border-radius: 10px; margin-bottom: 25px;">
+                        <h3 style="color: #ff4444; margin-top: 0; font-size: 1.2rem;">🚨 RED TEAM ATTACK</h3>
+                        <p style="font-style: italic; color: #ffcccc; margin-bottom: 0;">{report.get('red_team_warning', 'N/A')}</p>
+                    </div>
+                """, unsafe_allow_html=True)
 
-            # --- BULL & BEAR ---
-            c1, c2 = st.columns(2)
-            with c1:
-                st.markdown("### 🐂 Upside (Bull)")
-                for b in report.get("bull_case", []): st.write(f"✅ {b}")
-            with c2:
-                st.markdown("### 🐻 Downside (Bear)")
-                for b in report.get("bear_case", []): st.write(f"⚠️ {b}")
+                # 3. Bull & Bear Case Sloupce
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown("### 🐂 Bull Case (Upside)")
+                    for item in report.get('bull_case', []):
+                        st.write(f"✅ {item}")
+                
+                with col2:
+                    st.markdown("### 🐻 Bear Case (Downside)")
+                    for item in report.get('bear_case', []):
+                        st.write(f"⚠️ {item}")
 
-            st.markdown("---")
-            st.info(f"**💡 Syntéza:** {report.get('reasoning_synthesis')}")
-            
-            # Finální Metriky
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Risk/Reward", report.get("risk_reward_ratio", "N/A"))
-            m2.metric("Wait for Price", fmt_money(report.get("wait_for_price")))
-            m3.metric("AI Confidence", report.get("confidence"))
+                # 4. Syntéza a detaily
+                st.markdown("---")
+                st.markdown(f"**🛡️ Fundamentální podlaha:** {report.get('fundamental_floor', 'N/A')}")
+                st.info(f"**🎯 Strategická syntéza:** {report.get('reasoning_synthesis', 'N/A')}")
+                
+                # Spodní řada metrik
+                v_col1, v_col2, v_col3 = st.columns(3)
+                with v_col1:
+                    verdict = report.get('verdict', 'N/A')
+                    st.metric("Finální verdikt", verdict)
+                with v_col2:
+                    st.metric("Risk/Reward Ratio", report.get('risk_reward_ratio', 'N/A'))
+                with v_col3:
+                    st.metric("Confidence", report.get('confidence', 'N/A'))
     # ------------------------------------------------------------------------
     # TAB 4: Peer Comparison
     # ------------------------------------------------------------------------
