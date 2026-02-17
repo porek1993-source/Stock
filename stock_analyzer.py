@@ -381,12 +381,56 @@ def clamp(v: Optional[float], lo: float, hi: float) -> Optional[float]:
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_ticker_info(ticker: str) -> Dict[str, Any]:
-    """Fetch basic info from Yahoo Finance."""
+    """
+    Získá info o firmě. Primárně z Yahoo, při neúspěchu zkusí FMP API (Backup).
+    """
+    # 1. Pokus: Yahoo Finance (yfinance)
     try:
         t = yf.Ticker(ticker)
-        return t.info or {}
+        info = t.info
+        # Yahoo občas vrátí prázdný dict nebo dict bez klíčových dat, i když nespadne
+        if info and 'regularMarketPrice' in info and info['regularMarketPrice'] is not None:
+            return info
     except Exception:
-        return {}
+        pass # Ignorujeme chybu a jdeme na backup
+
+    # 2. Pokus: Financial Modeling Prep (FMP) - Backup
+    if FMP_API_KEY:
+        try:
+            # Endpoint v3/profile je zdarma a velmi spolehlivý
+            url = f"https://financialmodelingprep.com/api/v3/profile/{ticker}?apikey={FMP_API_KEY}"
+            response = requests.get(url)
+            data = response.json()
+            
+            if data and isinstance(data, list) and len(data) > 0:
+                fmp_data = data[0]
+                
+                # Převedeme FMP formát na formát, který očekává tvůj zbytek kódu (Yahoo style)
+                # Tím zajistíme, že zbytek aplikace (grafy, metriky) bude fungovat
+                return {
+                    'longName': fmp_data.get('companyName'),
+                    'symbol': fmp_data.get('symbol'),
+                    'sector': fmp_data.get('sector'),
+                    'industry': fmp_data.get('industry'),
+                    'longBusinessSummary': fmp_data.get('description'),
+                    'currentPrice': fmp_data.get('price'),
+                    'regularMarketPrice': fmp_data.get('price'),
+                    'marketCap': fmp_data.get('mktCap'),
+                    'beta': fmp_data.get('beta'),
+                    'currency': fmp_data.get('currency'),
+                    'website': fmp_data.get('website'),
+                    # FMP nemá přímo P/E v profilu, ale má cenu. Ostatní metriky (P/E) se dají dopočítat nebo nechat N/A
+                    'trailingPE': None, # FMP má P/E v jiném endpointu (ratios), pro profil stačí základ
+                    'dividendYield': None,
+                    'returnOnEquity': None, 
+                    'freeCashflow': None, # To si skript bere z cashflow statementu
+                    'country': fmp_data.get('country')
+                }
+        except Exception as e:
+            print(f"FMP Profile Error: {e}")
+
+    # Pokud vše selže
+    return {}
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
