@@ -1,11 +1,11 @@
 """
-Stock Picker Pro v4.0
+Stock Picker Pro v7.0
 ================================
-Robustní, dvojjazyčná (CZ/EN) aplikace optimalizovaná pro Gemini 2.5 Flash Lite (Free Tier)
-s pokročilou finanční analýzou, sektorovou inteligencí a perfektním UX.
+Pokročilá česká aplikace pro kvantitativní analýzu akcií.
+Funkce: DCF (Monte Carlo), Insider signal, Scorecard, Piotroski, Altman Z-Score,
+Graham Number, technická analýza (RSI/MACD/BB), peer comparison, AI analyst.
 
-Author: Enhanced by Claude
-Verze: 4.0
+Jazyk: pouze čeština
 """
 
 import os
@@ -198,11 +198,64 @@ except Exception:
 
 # Constants
 APP_NAME = "Stock Picker Pro"
-APP_VERSION = "v4.0"
+APP_VERSION = "v7.0"
 
 GEMINI_MODEL = "gemini-2.5-flash-lite"  # Optimized for Free Tier
 MAX_AI_RETRIES = 3  # Retry logic for rate limits
 RETRY_DELAY = 2  # seconds
+
+# ============================================================================
+# TOOLTIP VYSVĚTLIVKY PRO METRIKY
+# ============================================================================
+METRIC_TOOLTIPS: Dict[str, str] = {
+    # Valuace
+    "P/E":          "Price-to-Earnings: cena akcie děleno zisk na akcii (EPS). Říká, kolik korun platíš za 1 Kč zisku. P/E < 15 = levné, > 30 = drahé. Závisí hodně na sektoru.",
+    "P/B":          "Price-to-Book: cena / účetní hodnota na akcii. P/B < 1 = firma se obchoduje pod hodnotou svého majetku. Skvělé pro banky a výrobní firmy.",
+    "P/S":          "Price-to-Sales: cena / tržby na akcii. Užitečné pro firmy bez zisku (startupy, SaaS). P/S < 2 = levné, > 10 = drahé (závisí na sektoru).",
+    "PEG":          "PEG Ratio = P/E ÷ roční růst EPS (v %). Zohledňuje růst. PEG < 1 = potenciálně podhodnoceno, > 2 = drahé vzhledem k růstu. (Lynch: PEG 1 = férová cena)",
+    "EV/EBITDA":    "Enterprise Value / EBITDA: celková hodnota firmy (tržní cap + dluh - cash) děleno provozní zisk před odpisy. Lepší než P/E pro porovnání firem s různými dluhovou strukturou. < 10 = levné.",
+    "DCF":          "Discounted Cash Flow: model, který diskontuje budoucí free cash flow na současnou hodnotu. Výsledkem je 'férová cena' akcie. Velmi citlivé na předpoklady (WACC, growth rate).",
+    "MOS":          "Margin of Safety: jak velký je 'polštář' mezi férovou cenou (DCF) a aktuální tržní cenou. MOS > 0 = cena je pod férovkou (příležitost), MOS < 0 = cena je nad férovkou.",
+    "Graham Number":"Konzervativní fair value podle Benjamina Grahama = √(22,5 × EPS × Účetní hodnota/akcii). Dobré jako dolní mez valuace. Pokud cena < Graham Number = potenciálně levné.",
+    # Rentabilita
+    "ROE":          "Return on Equity: čistý zisk / vlastní kapitál. Jak efektivně firma zhodnocuje kapitál akcionářů. ROE > 15 % = skvělé, > 30 % = výjimečné (Buffett benchmark).",
+    "ROA":          "Return on Assets: čistý zisk / celková aktiva. Jak efektivně firma využívá veškerý majetek. ROA > 5 % = dobré, závisí na kapitálové náročnosti sektoru.",
+    "ROIC":         "Return on Invested Capital: NOPAT (zisk po daních) / (vlastní kapitál + dluh). Nejlepší ukazatel ekonomické eficiency. ROIC > WACC = firma vytváří hodnotu pro akcionáře.",
+    "Op. Margin":   "Provozní marže: provozní zisk / tržby. Kolik % z každé koruny tržeb zbyde po zaplacení nákladů (bez daní a úroků). > 15 % = zdravé, > 30 % = silný byznys model.",
+    "Profit Margin":"Čistá marže: čistý zisk / tržby. Kolik % z tržeb je skutečný zisk po všech nákladech, daních a úrocích. > 10 % = dobré.",
+    "Gross Margin": "Hrubá marže: (tržby - COGS) / tržby. Kolik zbyde před provozními náklady. Vysoká hrubá marže (> 50 %) naznačuje silný brand nebo moat (technologie, SW).",
+    # Růst
+    "Rev. Growth":  "Meziroční růst tržeb. > 10 % = solidní, > 20 % = rychlý růst. Záporný = varování. Pozor: high growth + nízká marže = riziková kombinace.",
+    "EPS Growth":   "Meziroční růst zisku na akcii (EPS). Důležitější než růst tržeb – říká, jestli firma roste ziskově. > 10 % = dobré, > 20 % = výborné.",
+    # Finanční zdraví
+    "Current Ratio":"Current Ratio = oběžná aktiva / krátkodobé závazky. Schopnost splácet krátkodobé dluhy. > 1,5 = zdravé, < 1 = možné problémy s likviditou.",
+    "Quick Ratio":  "Quick Ratio = (oběžná aktiva - zásoby) / krátkodobé závazky. Konzervativnější verze Current Ratio (bez zásob, které se hůř prodávají). > 1 = zdravé.",
+    "D/E":          "Debt-to-Equity: celkový dluh / vlastní kapitál. Finanční páka. D/E > 2 = vysoká zadluženost (riziko). D/E < 0,5 = konzervativní. Liší se hodně podle sektoru (utilities mají typicky vysoké D/E).",
+    "Debt/Equity":  "Debt-to-Equity: celkový dluh / vlastní kapitál. Finanční páka. D/E > 2 = vysoká zadluženost (riziko). D/E < 0,5 = konzervativní. Liší se hodně podle sektoru.",
+    "FCF Yield":    "Free Cash Flow Yield = FCF / tržní kapitalizace. Kolik % z tržní hodnoty firmy generuje v hotovosti. > 5 % = atraktivní. Přesnější než dividend yield pro ocenění firmy.",
+    # Technická
+    "RSI":          "Relative Strength Index (0–100): měří rychlost a změnu cenových pohybů. RSI > 70 = překoupeno (možný obrat dolů), RSI < 30 = přeprodáno (možný obrat nahoru). Neutrální: 40–60.",
+    "MACD":         "Moving Average Convergence Divergence: rozdíl EMA12 a EMA26. Když MACD překříží signální linii zdola = bullish signál. Shora = bearish. Lagging indikátor (reaguje se zpožděním).",
+    "MA50/MA200":   "Klouzavé průměry za 50 a 200 dní. Golden Cross (MA50 > MA200) = bullish trend. Death Cross (MA50 < MA200) = bearish trend. Cena nad MA200 = long-term uptrend.",
+    "BB":           "Bollinger Bands: střední pásmo (MA20) ± 2× směrodatná odchylka. Cena u horního pásma = překoupeno, u dolního = přeprodáno. 'Squeeze' (pásma blízko) = čeká se velký pohyb.",
+    # Riziko
+    "Piotroski":    "Piotroski F-Score (0–9): 9-bodový test fundamentální kvality (ziskovost, likvidita, efektivita). 8–9 = silná firma, 0–2 = slabá. Dobrý filtr pro value investing.",
+    "Altman Z":     "Altman Z-Score: model predikce bankrotu. Z > 2,99 = bezpečná zóna, 1,81–2,99 = šedá zóna, < 1,81 = riziko bankrotu. Pro průmyslové firmy (ne banky/pojišťovny).",
+    "Short Int.":   "Short Interest: % akcií v oběhu, které jsou vypůjčeny a prodány na krátko. > 10 % = vysoký short zájem (spekulanti sázejí na pokles). Může být bullish trigger (short squeeze).",
+    "Earnings Q.":  "Earnings Quality (CFO / Net Income): poměr provozního cash flow k čistému zisku. < 0,8 = zisk může být 'papírový' (accruals, účetní triky). > 1,1 = vynikající – firma vydělává více v cash než reportuje.",
+    # Insider
+    "Insider Sig.": "Insider Trading Signal: vážený součet nákupů a prodejů insiderů (CEO, CFO, ředitelé) za posledních 6 měsíců. Zohledňuje roli (CEO = 3×) a hodnotu transakce. +100 = silný bullish signál.",
+    # DCF pokročilé
+    "WACC":         "Weighted Average Cost of Capital: vážené průměrné náklady kapitálu. Diskontní sazba v DCF modelu. Čím vyšší WACC, tím nižší fair value. Zahrnuje cenu dluhu i vlastního kapitálu (CAPM).",
+    "Terminal Growth":"Terminální růst: předpokládaný věčný růst FCF po skončení projekčního období. Typicky 2–3 % (≈ inflace/GDP). Velmi citlivý parametr – malá změna = velký dopad na fair value.",
+    "Implied Growth":"Reverse DCF: jaký růst FCF trh aktuálně 'očekává' při aktuální ceně akcie. Pokud je implied growth vyšší než realistický, akcie je pravděpodobně předražená.",
+    # Monte Carlo
+    "P10/P90":      "Percentily Monte Carlo simulace: P10 = pesimistický scénář (jen 10 % simulací dopadlo hůře), P90 = optimistický (jen 10 % dopadlo lépe). Medián je robustnější střed než průměr.",
+}
+
+def metric_help(key: str) -> Optional[str]:
+    """Vrátí tooltip text pro danou metriku nebo None."""
+    return METRIC_TOOLTIPS.get(key)
 
 
 # ============================================================================
@@ -382,11 +435,17 @@ def calculate_piotroski_fscore(info: Dict[str, Any], income: pd.DataFrame, balan
             score += p6; breakdown["Current Ratio > 1"] = p6
 
         # Dilution: shares outstanding - pokud rostou, je to negativní
+        # Ředění: porovnáme impliedShares (z market cap / price) vs sharesOutstanding
+        # Pokud firma aktivně odkupuje (buybacks), shares klesají = pozitivní
         shares_curr = safe_float(info.get("sharesOutstanding"))
-        shares_float = safe_float(info.get("floatShares"))
-        if shares_curr and shares_float:
-            p7 = 1 if shares_curr <= shares_float * 1.02 else 0  # max 2% dilution tolerance
-            score += p7; breakdown["Bez ředění"] = p7
+        # Proxy: buyback yield > 0 nebo nízká % změna impliujeme z treasury
+        buyback = safe_float(info.get("repurchaseOfStock") or info.get("commonStockRepurchased"))
+        if shares_curr and buyback is not None:
+            p7 = 1 if buyback < 0 else 0  # negativní = firma zpětně odkupuje (pozitivní sign)
+            score += p7; breakdown["Zpětné odkupy (bez ředění)"] = p7
+        elif shares_curr:
+            # Fallback: pokud není info o buybacku, neutrálně přiřadíme 0
+            breakdown["Zpětné odkupy (bez ředění)"] = 0
 
         # --- Efektivita (2 body) ---
         gm_curr = safe_float(info.get("grossMargins"))
@@ -1581,36 +1640,45 @@ def _fetch_insider_from_sec(ticker: str, max_filings: int = 12, max_transactions
         ("Accept", "application/xml,text/xml,text/plain,*/*"),
         ("Accept-Encoding", "gzip, deflate"),
     )
+    # ── SEC debug countery ──────────────────────────────────────────────────
+    _dbg_filings_tried  = 0
+    _dbg_xml_downloaded = 0
+    _dbg_xml_parsed_ok  = 0
+    _dbg_tx_found       = 0
+    _dbg_index_errors   = 0
 
     for i in idxs:
         try:
             accession = str(accs[i])
             accession_nodash = accession.replace("-", "")
             filing_date = fdates[i] if i < len(fdates) else None
+            _dbg_filings_tried += 1
 
             # Use index.json to locate XML
             index_url = f"https://data.sec.gov/Archives/edgar/data/{cik_int}/{accession_nodash}/index.json"
             st_i, index_payload, err_i = _http_get_json(index_url, headers_json)
             if st_i != 200 or not isinstance(index_payload, dict):
-                # fallback: try primary document directly via submissions in older logic (skipped here)
+                _dbg_index_errors += 1
                 continue
 
             xml_name = _sec_pick_xml_from_index(index_payload)
             if not xml_name:
+                _dbg_index_errors += 1
                 continue
 
             filing_url = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession_nodash}/{xml_name}"
             st_x, xml_text, err_x = _http_get_text(filing_url, headers_xml)
             if st_x != 200 or not xml_text:
                 continue
+            _dbg_xml_downloaded += 1
 
             # parse XML
             if "<ownershipDocument" not in xml_text and "<nonDerivativeTransaction" not in xml_text:
-                # sometimes it's wrapped; still try parse if it looks like XML
                 if "<" not in xml_text[:50]:
                     continue
 
             root = ET.fromstring(xml_text.encode("utf-8", errors="ignore"))
+            _dbg_xml_parsed_ok += 1
 
             owner = None
             officer_title = None
@@ -1661,6 +1729,7 @@ def _fetch_insider_from_sec(ticker: str, max_filings: int = 12, max_transactions
                     "Source": "SEC Form 4",
                     "FilingURL": filing_url,
                 })
+                _dbg_tx_found += 1
                 if len(rows) >= max_transactions:
                     break
 
@@ -1674,6 +1743,18 @@ def _fetch_insider_from_sec(ticker: str, max_filings: int = 12, max_transactions
     if not df.empty:
         df = df.sort_values("Date", ascending=False)
     meta["items"] = int(len(df))
+    # Bohatší debug note pro případ 0 výsledků
+    meta["note"] = (
+        f"Filings zkuseno: {_dbg_filings_tried}/{len(idxs)} | "
+        f"XML staženo: {_dbg_xml_downloaded} | "
+        f"XML OK: {_dbg_xml_parsed_ok} | "
+        f"Transakcí nalezeno: {_dbg_tx_found} | "
+        f"Index chyby: {_dbg_index_errors}"
+    )
+    if _dbg_xml_downloaded == 0:
+        meta["note"] += " ⚠️ Žádné XML nebylo staženo – zkontroluj SEC blok nebo User-Agent."
+    elif _dbg_tx_found == 0:
+        meta["note"] += " ℹ️ XML OK, ale žádné nonDerivativeTransaction – možná jen opce/granty."
     return df, meta
 
 
@@ -1844,6 +1925,10 @@ def extract_metrics(info: Dict[str, Any], ticker: str) -> Dict[str, Metric]:
     pb = safe_float(info.get("priceToBook"))
     ps = safe_float(info.get("priceToSalesTrailing12Months"))
     peg = safe_float(info.get("pegRatio"))
+    # Derived PEG fallback: P/E ÷ (earnings_growth × 100) – když provider PEG nedá
+    if peg is None and pe is not None and pe > 0 and earnings_growth is not None and earnings_growth > 0.005:
+        _dpeg = pe / (earnings_growth * 100.0)
+        peg = round(_dpeg, 2) if 0.01 < _dpeg < 10 else None
     ev_ebitda = safe_float(info.get("enterpriseToEbitda"))
     
     # Profitability
@@ -1853,15 +1938,23 @@ def extract_metrics(info: Dict[str, Any], ticker: str) -> Dict[str, Metric]:
     profit_margin = safe_float(info.get("profitMargins"))
     gross_margin = safe_float(info.get("grossMargins"))
     
-    # Growth
-    revenue_growth = safe_float(info.get("revenueGrowth"))
-    earnings_growth = safe_float(info.get("earningsGrowth"))
+    # Growth – fallback na quarterly data když annual chybí
+    revenue_growth = (safe_float(info.get("revenueGrowth"))
+                      or safe_float(info.get("revenueQuarterlyGrowth")))
+    earnings_growth = (safe_float(info.get("earningsGrowth"))
+                       or safe_float(info.get("earningsQuarterlyGrowth")))
     earnings_quarterly_growth = safe_float(info.get("earningsQuarterlyGrowth"))
     
     # Financial health
     current_ratio = safe_float(info.get("currentRatio"))
     quick_ratio = safe_float(info.get("quickRatio"))
-    debt_to_equity = safe_float(info.get("debtToEquity"))
+    # D/E normalizace: Yahoo Finance vrací D/E v ×100 formátu (napr. "50" = skutečně 0.50).
+    # Rozumný reálný D/E rozsah: 0–10. Hodnoty 10–2000 vydělíme 100.
+    _raw_de = safe_float(info.get("debtToEquity"))
+    if _raw_de is not None and 10 < _raw_de < 2000:
+        debt_to_equity = round(_raw_de / 100.0, 4)
+    else:
+        debt_to_equity = _raw_de
     total_cash = safe_float(info.get("totalCash"))
     total_debt = safe_float(info.get("totalDebt"))
     
@@ -2001,7 +2094,7 @@ def _fetch_fmp_key_metrics_ttm(ticker: str) -> Tuple[Optional[Dict[str, Any]], D
 
     return None, meta
 
-@st.cache_data(show_spinner=False, ttl=86400)
+@st.cache_data(show_spinner=False, ttl=21600)  # 6 hodin – rate limity AV
 def _fetch_alpha_overview(ticker: str) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
     meta = {"provider": "AlphaVantage", "endpoint": "query?function=OVERVIEW", "status": None, "error": None, "url": None}
     if not ALPHAVANTAGE_API_KEY:
@@ -2020,7 +2113,7 @@ def _fetch_alpha_overview(ticker: str) -> Tuple[Optional[Dict[str, Any]], Dict[s
         return None, meta
     return payload, meta
 
-@st.cache_data(show_spinner=False, ttl=86400)
+@st.cache_data(show_spinner=False, ttl=21600)  # 6 hodin – rate limity Finnhub
 def _fetch_finnhub_metric(ticker: str) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
     meta = {"provider": "Finnhub", "endpoint": "api/v1/stock/metric?metric=all", "status": None, "error": None, "url": None}
     if not FINNHUB_API_KEY:
@@ -2059,6 +2152,9 @@ def enrich_metrics_multisource(ticker: str, metrics: Dict[str, Metric], info: Di
         v = _maybe_pct(val) if pct else safe_float(val)
         if v is None:
             return
+        # D/E normalizace i pro hodnoty z externích providerů (×100 formát)
+        if key == "debt_to_equity" and v is not None and 10 < v < 2000:
+            v = round(v / 100.0, 4)
         metrics[key].value = v
         metrics[key].source = src
         debug["fills"][key] = src
@@ -2215,13 +2311,26 @@ def enrich_metrics_multisource(ticker: str, metrics: Dict[str, Metric], info: Di
     if missing_left:
         debug["steps"].append({"missing_after_fallbacks": missing_left})
 
+    # ── Derived PEG jako poslední záchrana ────────────────────────────────────
+    # Pokud PEG stále chybí, dopočítáme z P/E a earnings growth (i po enrichmentu)
+    if _is_missing("peg"):
+        _pe  = safe_float(metrics.get("pe").value if metrics.get("pe") else None)
+        _eg  = safe_float(metrics.get("earnings_growth").value if metrics.get("earnings_growth") else None)
+        if _pe is not None and _pe > 0 and _eg is not None and _eg > 0.005:
+            _dpeg = _pe / (_eg * 100.0)
+            if 0.01 < _dpeg < 10:
+                metrics["peg"].value  = round(_dpeg, 2)
+                metrics["peg"].source = "Derived (P/E ÷ EPS Growth%)"
+                debug["fills"]["peg"] = "Derived"
+                debug["steps"].append("PEG dopočítán z P/E a EPS growth")
+
     return metrics, debug
 
 
 def calculate_metric_score(metric: Metric) -> float:
     """Calculate 0-10 score for a single metric."""
     if metric.value is None:
-        return 5.0
+        return 3.0  # Chybějící data = mírně negativní (dříve 5.0 uměle nafukovalo skóre)
     
     val = metric.value
     
@@ -2402,7 +2511,7 @@ def compute_insider_pro_signal(insider_df: Optional[pd.DataFrame]) -> Dict[str, 
         "officer": 1.0,
     }
 
-    cutoff_date = dt.datetime.now() - dt.timedelta(days=180)
+    cutoff_date = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None) - dt.timedelta(days=180)  # naive UTC
 
     buy_signal = 0.0
     sell_signal = 0.0
@@ -2450,7 +2559,7 @@ def compute_insider_pro_signal(insider_df: Optional[pd.DataFrame]) -> Dict[str, 
             trans_dt = pd.to_datetime(date_raw, errors="coerce")
             if pd.isna(trans_dt) or trans_dt.to_pydatetime() < cutoff_date:
                 continue
-            trans_dt_py = trans_dt.to_pydatetime()
+            trans_dt_py = trans_dt.to_pydatetime().replace(tzinfo=None)  # normalize to naive
 
             code = str(row.get("Code") or "").strip().upper()
             tx_txt = _norm(row.get("Transaction"))
@@ -2499,13 +2608,13 @@ def compute_insider_pro_signal(insider_df: Optional[pd.DataFrame]) -> Dict[str, 
             owner = str(row.get("Owner") or "").strip().upper()
 
             if is_buy:
-                buy_signal += float(value) * weight
+                buy_signal += abs(float(value)) * weight  # abs() – někteří provideři vrací záporné
                 buy_count += 1
                 if owner:
                     buy_dates.append(trans_dt_py)
                     buy_owners.append(owner)
             elif is_sell:
-                sell_signal += float(value) * weight
+                sell_signal += abs(float(value)) * weight  # abs() – konzistentní s buy
                 sell_count += 1
                 if owner:
                     sell_dates.append(trans_dt_py)
@@ -2717,8 +2826,8 @@ def generate_ai_analyst_report(ticker: str, company: str, info: Dict, metrics: D
     if not GEMINI_API_KEY:
         return {"market_situation": "Chybí API klíč.", "verdict": "N/A"}
 
-    # 1. URČENÍ JAZYKA (Pojistka proti vietnamštině)
-    target_lang = "ČEŠTINĚ" if st.session_state.get("language") == "cz" else "ANGLIČTINĚ"
+    # Vždy česky
+    target_lang = "ČEŠTINĚ"
 
     # 2. PŘÍPRAVA DAT
     roic_val = calculate_roic(info) 
@@ -2729,7 +2838,7 @@ def generate_ai_analyst_report(ticker: str, company: str, info: Dict, metrics: D
     # 3. SESTAVENÍ PROMPTU (Tady byla ta chyba v odsazení)
     context = f"""
 Jsi Seniorní Portfolio Manažer a Contrarian Analyst se specializací na ASYMETRICKÝ RISK/REWARD.
-DŮLEŽITÉ: Celou analýzu a všechny texty v JSON výstupu napiš v {target_lang}.
+DŮLEŽITÉ: Celou analýzu a všechny texty v JSON výstupu napiš VÝHRADNĚ V ČEŠTINĚ.
 
 VSTUPNÍ DATA:
 - Aktiva: {company} ({ticker}) | Sektor: {info.get('sector')} / {info.get('industry')}
@@ -3200,34 +3309,12 @@ def estimate_smart_params(info: Dict[str, Any], metrics: Dict[str, "Metric"]) ->
     }
 
 
-# -------------------------------------------------------------------
-# i18n helper (minimal)
-# -------------------------------------------------------------------
-TRANSLATIONS = {
-    "cs": {
-        "app_name": "Stock Picker Pro",
-        "language": "Jazyk",
-    },
-    "en": {
-        "app_name": "Stock Picker Pro",
-        "language": "Language",
-    },
-}
-
-def t(key: str, lang: str = "cs") -> str:
-    """Tiny translation helper. Returns key if translation missing."""
-    try:
-        lang = (lang or "cs").lower()
-    except Exception:
-        lang = "cs"
-    return TRANSLATIONS.get(lang, TRANSLATIONS["cs"]).get(key, str(key))
+# Pouze čeština – překladový systém odstraněn
 
 def main():
     # Session state initialization
     if "force_tab_label" not in st.session_state:
         st.session_state.force_tab_label = None
-    if "language" not in st.session_state:
-        st.session_state.language = "cz"  # Default language
     if "ai_report_data" not in st.session_state:
         st.session_state.ai_report_data = None
     if "ai_report_ticker" not in st.session_state:
@@ -3371,20 +3458,9 @@ def main():
     # ========================================================================
 
     with st.sidebar:
-        st.title(f"📈 {t('app_name', st.session_state.language)}")
-        st.caption(f"{APP_VERSION} - Advanced Quant Analysis")
+        st.title("📈 Stock Picker Pro")
+        st.caption("v7.0 · Pokročilá kvantitativní analýza")
         st.markdown("---")
-        
-        # Language selector
-        lang_options = {"🇨🇿 Čeština": "cz", "🇺🇸 English": "en"}
-        selected_lang_label = st.selectbox(
-            t("language", st.session_state.language),
-            options=list(lang_options.keys()),
-            index=0 if st.session_state.language == "cz" else 1,
-            key="lang_select"
-        )
-        st.session_state.language = lang_options[selected_lang_label]
-        lang = st.session_state.language
         
         st.markdown("---")
         
@@ -3455,29 +3531,29 @@ def main():
             dcf_growth = st.slider(
                 "Růst FCF (roční)",
                 0.0, 0.50, 0.10, 0.01,
-                help="Očekávaný roční růst Free Cash Flow",
+                help="Očekávaný roční růst FCF. Historicky S&P 500 ≈ 8–10 %, tech 15–25 %, utility 3–5 %. Smart DCF odhaduje automaticky.",
                 disabled=smart_dcf
             )
             dcf_terminal = st.slider(
                 "Terminální růst",
                 0.0, 0.10, 0.03, 0.01,
-                help="Dlouhodobý růst po projektovaném období"
+                help="Terminální (věčný) růst po skončení projekce. Typicky 2–3 % ≈ inflace. NIKDY nezadávej > WACC – model by se rozpadl. Malá změna = velký dopad na fair value!"
             )
             dcf_wacc = st.slider(
                 "WACC (diskont)",
                 0.05, 0.20, 0.10, 0.01,
-                help="Vážené průměrné náklady kapitálu",
+                help="WACC: diskontní sazba DCF. Pro US large cap typicky 8–12 %. Vyšší WACC = nižší fair value. Smart DCF odhaduje z beta a sektoru.",
                 disabled=smart_dcf
             )
             dcf_years = st.slider(
                 "Projektované roky",
                 3, 10, 5, 1,
-                help="Počet let pro projekci FCF"
+                help="Na kolik let dopředu modelujeme FCF. Standardně 5 let. Pro stabilní firmy 5–7 let, pro cyklické 3–5 let."
             )
             dcf_exit_multiple = st.slider(
                 "Exit Multiple (FCF)",
                 10.0, 50.0, 25.0, 1.0,
-                help="Násobek FCF v posledním projektovaném roce pro terminal value (Exit Multiple metoda)",
+                help="Exit Multiple: kolikrát FCF hodnotíme v posledním roce. Tech firmy 20–35×, utility 10–15×, industrials 15–20×.",
                 disabled=smart_dcf
             )
         
@@ -3817,14 +3893,14 @@ def main():
             
             m1, m2 = st.columns(2)
             with m1:
-                st.metric("P/E", fmt_num(metrics.get("pe").value if metrics.get("pe") else None))
-                st.metric("ROE", fmt_pct(metrics.get("roe").value if metrics.get("roe") else None))
-                st.metric("Op. Margin", fmt_pct(metrics.get("operating_margin").value if metrics.get("operating_margin") else None))
+                st.metric("P/E", fmt_num(metrics.get("pe").value if metrics.get("pe") else None), help=metric_help("P/E"))
+                st.metric("ROE", fmt_pct(metrics.get("roe").value if metrics.get("roe") else None), help=metric_help("ROE"))
+                st.metric("Op. Margin", fmt_pct(metrics.get("operating_margin").value if metrics.get("operating_margin") else None), help=metric_help("Op. Margin"))
             
             with m2:
-                st.metric("FCF Yield", fmt_pct(metrics.get("fcf_yield").value if metrics.get("fcf_yield") else None))
-                st.metric("Debt/Equity", fmt_num(metrics.get("debt_to_equity").value if metrics.get("debt_to_equity") else None))
-                st.metric("Rev. Growth", fmt_pct(metrics.get("revenue_growth").value if metrics.get("revenue_growth") else None))
+                st.metric("FCF Yield", fmt_pct(metrics.get("fcf_yield").value if metrics.get("fcf_yield") else None), help=metric_help("FCF Yield"))
+                st.metric("Debt/Equity", fmt_num(metrics.get("debt_to_equity").value if metrics.get("debt_to_equity") else None), help=metric_help("Debt/Equity"))
+                st.metric("Rev. Growth", fmt_pct(metrics.get("revenue_growth").value if metrics.get("revenue_growth") else None), help=metric_help("Rev. Growth"))
 
             # Nové advanced metriky
             st.markdown("---")
@@ -3832,30 +3908,30 @@ def main():
             adv1, adv2, adv3, adv4 = st.columns(4)
             with adv1:
                 pf_color = "normal" if piotroski_score >= 6 else ("inverse" if piotroski_score <= 3 else "off")
-                st.metric("Piotroski F-Score", f"{piotroski_score}/9",
+                st.metric("Piotroski F-Score", f"{piotroski_score}/9", help=metric_help("Piotroski"),
                           delta="Silná" if piotroski_score >= 6 else ("Slabá" if piotroski_score <= 3 else "Průměrná"),
                           delta_color=pf_color)
             with adv2:
                 z_color = "normal" if altman_z and altman_z > 2.99 else ("inverse" if altman_z and altman_z < 1.81 else "off")
-                st.metric("Altman Z-Score", fmt_num(altman_z), delta=altman_zone.split(" ", 1)[-1] if altman_zone else None, delta_color=z_color)
+                st.metric("Altman Z-Score", fmt_num(altman_z), delta=altman_zone.split(" ", 1)[-1] if altman_zone else None, delta_color=z_color, help=metric_help("Altman Z"))
             with adv3:
-                st.metric("Graham Number", fmt_money(graham_number),
+                st.metric("Graham Number", fmt_money(graham_number), help=metric_help("Graham Number"),
                           delta=f"{((current_price/graham_number-1)*100):+.1f}% vs cena" if graham_number and current_price else None,
                           delta_color="inverse" if graham_number and current_price and current_price > graham_number else "normal")
             with adv4:
                 si_pct = short_interest * 100 if short_interest else None
                 si_color = "inverse" if si_pct and si_pct > 10 else "normal"
-                st.metric("Short Interest", f"{si_pct:.1f}%" if si_pct else "—",
+                st.metric("Short Interest", f"{si_pct:.1f}%" if si_pct else "—", help=metric_help("Short Int."),
                           delta="Vysoký!" if si_pct and si_pct > 10 else None, delta_color=si_color)
 
             st.markdown("---")
             eq_col1, eq_col2 = st.columns(2)
             with eq_col1:
-                st.metric("Earnings Quality (CFO/NI)", fmt_num(earnings_quality_ratio))
+                st.metric("Earnings Quality (CFO/NI)", fmt_num(earnings_quality_ratio), help=metric_help("Earnings Q."))
                 st.caption(earnings_quality_label)
             with eq_col2:
                 roic_val_display = calculate_roic(info)
-                st.metric("ROIC (approx.)", fmt_pct(roic_val_display))
+                st.metric("ROIC (approx.)", fmt_pct(roic_val_display), help=metric_help("ROIC"))
 
             with st.expander("🔧 Metrics debug", expanded=False):
                 mdbg = st.session_state.get("metrics_enrich_debug", None)
@@ -3892,9 +3968,9 @@ def main():
                 delta=insider_signal.get('label', 'N/A')
             )
         with ins2:
-            st.metric("Nákupy (6M)", insider_signal.get('recent_buys', 0))
+            st.metric("Nákupy (6M)", insider_signal.get('recent_buys', 0), help="Počet open-market nákupů insiderů za posledních 6 měsíců. Nákupy insiderů jsou silnější signál než prodeje (insideři prodávají z mnoha důvodů, ale kupují jen když věří v růst).")
         with ins3:
-            st.metric("Prodeje (6M)", insider_signal.get('recent_sells', 0))
+            st.metric("Prodeje (6M)", insider_signal.get('recent_sells', 0), help="Počet open-market prodejů insiderů za posledních 6 měsíců. Samotné prodeje nejsou nutně negativní – insideři prodávají z daňových, osobních nebo diverzifikačních důvodů.")
         
         if insider_signal.get("cluster_buying"):
             st.markdown(
@@ -4226,19 +4302,47 @@ def main():
         st.markdown("### 🔍 Detailní metriky")
         
         if individual_scores:
-            metric_df = pd.DataFrame([
-                {
-                    "Metrika": name,
-                    "Hodnota": fmt_num(metrics.get(key).value) if key in ["pe", "pb", "ps", "peg", "current_ratio", "quick_ratio", "debt_to_equity"] 
-                               else fmt_pct(metrics.get(key).value) if key in ["roe", "roa", "operating_margin", "profit_margin", "gross_margin", "revenue_growth", "earnings_growth", "fcf_yield"]
-                               else fmt_num(metrics.get(key).value),
-                    "Skóre": f"{score:.1f}/10"
-                }
-                for key, metric in metrics.items()
-                for name, score in individual_scores.items()
-                if metric.name == name
-            ])
-            
+            # Klíč → hezký název → tooltip
+            _metric_tooltip_map = {
+                "pe": ("P/E", metric_help("P/E")),
+                "pb": ("P/B", metric_help("P/B")),
+                "ps": ("P/S", metric_help("P/S")),
+                "peg": ("PEG", metric_help("PEG")),
+                "ev_ebitda": ("EV/EBITDA", metric_help("EV/EBITDA")),
+                "roe": ("ROE", metric_help("ROE")),
+                "roa": ("ROA", metric_help("ROA")),
+                "operating_margin": ("Op. Marže", metric_help("Op. Margin")),
+                "profit_margin": ("Čistá Marže", metric_help("Profit Margin")),
+                "gross_margin": ("Hrubá Marže", metric_help("Gross Margin")),
+                "revenue_growth": ("Růst Tržeb", metric_help("Rev. Growth")),
+                "earnings_growth": ("Růst EPS", metric_help("EPS Growth")),
+                "current_ratio": ("Current Ratio", metric_help("Current Ratio")),
+                "quick_ratio": ("Quick Ratio", metric_help("Quick Ratio")),
+                "debt_to_equity": ("Dluh/Vlastní kap.", metric_help("D/E")),
+                "fcf_yield": ("FCF Yield", metric_help("FCF Yield")),
+            }
+            metric_rows = []
+            for key, metric in metrics.items():
+                for name, score in individual_scores.items():
+                    if metric.name == name:
+                        nice_name, tip = _metric_tooltip_map.get(key, (name, None))
+                        if key in ["pe", "pb", "ps", "peg", "current_ratio", "quick_ratio", "debt_to_equity"]:
+                            val_str = fmt_num(metric.value)
+                        elif key in ["roe", "roa", "operating_margin", "profit_margin", "gross_margin",
+                                     "revenue_growth", "earnings_growth", "fcf_yield"]:
+                            val_str = fmt_pct(metric.value)
+                        else:
+                            val_str = fmt_num(metric.value)
+                        score_bar = "█" * int(score) + "░" * (10 - int(score))
+                        metric_rows.append({
+                            "Metrika": nice_name,
+                            "Hodnota": val_str,
+                            "Skóre": f"{score:.1f}/10",
+                            "Vizuál": score_bar,
+                            "Zdroj": metric.source or "yfinance",
+                            "ℹ️ Popis": tip[:80] + "…" if tip and len(tip) > 80 else (tip or ""),
+                        })
+            metric_df = pd.DataFrame(metric_rows)
             st.dataframe(metric_df, use_container_width=True, hide_index=True)
 
         # Piotroski F-Score breakdown
@@ -4288,16 +4392,16 @@ def main():
             dcf_col1, dcf_col2, dcf_col3, dcf_col4 = st.columns(4)
             
             with dcf_col1:
-                st.metric("Férová hodnota (DCF)", fmt_money(fair_value_dcf))
+                st.metric("Férová hodnota (DCF)", fmt_money(fair_value_dcf), help=metric_help("DCF"))
             with dcf_col2:
                 st.metric("Aktuální cena", fmt_money(current_price))
             with dcf_col3:
                 mos_str = f"{mos_dcf*100:+.1f}%" if mos_dcf is not None else "—"
                 mos_color_delta = mos_str if mos_dcf else None
-                st.metric("Margin of Safety", mos_str, delta=mos_color_delta)
+                st.metric("Margin of Safety", mos_str, delta=mos_color_delta, help=metric_help("MOS"))
             with dcf_col4:
                 if implied_growth is not None:
-                    st.metric("Implied Growth (Reverse DCF)", f"{implied_growth*100:.1f}%")
+                    st.metric("Implied Growth (Reverse DCF)", f"{implied_growth*100:.1f}%", help=metric_help("Implied Growth"))
                 else:
                     st.metric("Implied Growth", "—")
             
@@ -4313,7 +4417,7 @@ def main():
                 growth_rates = [0.05, 0.08, 0.10, 0.12, 0.15, 0.20]
                 sens_data = []
                 for g in growth_rates:
-                    fv = calculate_dcf_fair_value(fcf, g, dcf_terminal, dcf_wacc, dcf_years, shares)
+                    fv = calculate_dcf_fair_value(fcf, g, dcf_terminal, used_dcf_wacc, dcf_years, shares)
                     upside = ((fv / current_price) - 1) * 100 if fv and current_price else None
                     sens_data.append({
                         "Růst": f"{g*100:.0f}%",
@@ -4327,7 +4431,7 @@ def main():
                 wacc_rates = [0.08, 0.09, 0.10, 0.11, 0.12, 0.15]
                 wacc_data = []
                 for w in wacc_rates:
-                    fv = calculate_dcf_fair_value(fcf, dcf_growth, dcf_terminal, w, dcf_years, shares)
+                    fv = calculate_dcf_fair_value(fcf, used_dcf_growth, dcf_terminal, w, dcf_years, shares)
                     upside = ((fv / current_price) - 1) * 100 if fv and current_price else None
                     wacc_data.append({
                         "WACC": f"{w*100:.0f}%",
@@ -4357,11 +4461,11 @@ def main():
                 import plotly.graph_objects as go
                 mc_col1, mc_col2, mc_col3 = st.columns(3)
                 with mc_col1:
-                    st.metric("P10 (pesimistický)", fmt_money(mc_dcf.get("p10")))
+                    st.metric("P10 (pesimistický)", fmt_money(mc_dcf.get("p10")), help=metric_help("P10/P90"))
                     st.metric("Medián", fmt_money(mc_dcf.get("median")))
                 with mc_col2:
                     st.metric("Průměr", fmt_money(mc_dcf.get("mean")))
-                    st.metric("P90 (optimistický)", fmt_money(mc_dcf.get("p90")))
+                    st.metric("P90 (optimistický)", fmt_money(mc_dcf.get("p90")), help=metric_help("P10/P90"))
                 with mc_col3:
                     prob_upside = None
                     if current_price and mc_dcf.get("mean"):
@@ -4443,20 +4547,20 @@ def main():
                 if rsi_val is not None:
                     rsi_color = "#ff4444" if rsi_val > 70 else ("#00ff88" if rsi_val < 30 else "#ffaa00")
                     rsi_label = "🔴 Překoupeno" if rsi_val > 70 else ("🟢 Přeprodáno" if rsi_val < 30 else "🟡 Neutrální")
-                    st.metric("RSI (14)", f"{rsi_val:.1f}", delta=rsi_label)
+                    st.metric("RSI (14)", f"{rsi_val:.1f}", delta=rsi_label, help=metric_help("RSI"))
                 else:
-                    st.metric("RSI (14)", "—")
+                    st.metric("RSI (14)", "—", help=metric_help("RSI"))
 
             # --- MACD ---
             with ta2:
-                st.metric("MACD signal", tech_signals.get("macd_label", "—"))
+                st.metric("MACD signal", tech_signals.get("macd_label", "—"), help=metric_help("MACD"))
 
             # --- MA200 ---
             with ta3:
                 pct_ma200 = tech_signals.get("pct_from_ma200")
                 if pct_ma200 is not None:
                     ma200_color = "normal" if pct_ma200 > 0 else "inverse"
-                    st.metric("vs. MA200", f"{pct_ma200*100:+.1f}%", delta_color=ma200_color)
+                    st.metric("vs. MA200", f"{pct_ma200*100:+.1f}%", delta_color=ma200_color, help=metric_help("MA50/MA200"))
                 else:
                     st.metric("vs. MA200", "—")
 
