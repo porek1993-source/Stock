@@ -381,89 +381,13 @@ def clamp(v: Optional[float], lo: float, hi: float) -> Optional[float]:
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_ticker_info(ticker: str) -> Dict[str, Any]:
-    """
-    Získá data o firmě. Primárně z FMP (pokud je klíč), jinak zkouší Yahoo.
-    Skládá data z Profile, Ratios a Key Metrics, aby nahradil yfinance.
-    """
-    info = {}
-    
-    # 1. CESTA: FINANCIAL MODELING PREP (Priorita - Spolehlivé)
-    if FMP_API_KEY:
-        try:
-            # A) PROFILE (Cena, Sektor, Popis, Beta)
-            url_profile = f"https://financialmodelingprep.com/api/v3/profile/{ticker}?apikey={FMP_API_KEY}"
-            prof_data = requests.get(url_profile).json()
-            
-            if prof_data and isinstance(prof_data, list):
-                p = prof_data[0]
-                info.update({
-                    'longName': p.get('companyName'),
-                    'symbol': p.get('symbol'),
-                    'sector': p.get('sector'),
-                    'industry': p.get('industry'),
-                    'longBusinessSummary': p.get('description'),
-                    'currentPrice': p.get('price'),
-                    'regularMarketPrice': p.get('price'),
-                    'marketCap': p.get('mktCap'),
-                    'beta': p.get('beta'),
-                    'currency': p.get('currency'),
-                    'country': p.get('country'),
-                    'website': p.get('website')
-                })
-
-                # B) RATIOS TTM (P/E, ROE, Margins) - Klíčové pro metriky
-                url_ratios = f"https://financialmodelingprep.com/api/v3/ratios-ttm/{ticker}?apikey={FMP_API_KEY}"
-                ratios_data = requests.get(url_ratios).json()
-                if ratios_data and isinstance(ratios_data, list):
-                    r = ratios_data[0]
-                    info.update({
-                        'trailingPE': r.get('peRatioTTM'),
-                        'returnOnEquity': r.get('returnOnEquityTTM'),
-                        'returnOnAssets': r.get('returnOnAssetsTTM'),
-                        'operatingMargins': r.get('operatingProfitMarginTTM'),
-                        'profitMargins': r.get('netProfitMarginTTM'),
-                        'grossMargins': r.get('grossProfitMarginTTM'),
-                        'priceToBook': r.get('priceToBookRatioTTM'),
-                        'priceToSalesTrailing12Months': r.get('priceToSalesRatioTTM'),
-                        'dividendYield': r.get('dividendYielTTM'), # FMP má překlep v názvu (Yiel)
-                        'payoutRatio': r.get('payoutRatioTTM'),
-                        'currentRatio': r.get('currentRatioTTM'),
-                        'quickRatio': r.get('quickRatioTTM')
-                    })
-
-                # C) KEY METRICS TTM (Debt, Cash, EV/EBITDA, FCF)
-                url_metrics = f"https://financialmodelingprep.com/api/v3/key-metrics-ttm/{ticker}?apikey={FMP_API_KEY}"
-                metrics_data = requests.get(url_metrics).json()
-                if metrics_data and isinstance(metrics_data, list):
-                    m = metrics_data[0]
-                    info.update({
-                        'enterpriseToEbitda': m.get('enterpriseValueOverEBITDATTM'),
-                        'debtToEquity': m.get('debtToEquityTTM'),
-                        'totalCash': m.get('cashAndCashEquivalentsTTM'),
-                        'totalDebt': m.get('totalDebtTTM'),
-                        'freeCashflow': m.get('freeCashFlowTTM'), # Přímé FCF!
-                        'operatingCashflow': m.get('operatingCashFlowTTM'),
-                        'revenueGrowth': m.get('revenueGrowthTTM') # Občas chybí, ale zkusíme
-                    })
-                
-                # Pokud se povedlo načíst aspoň cenu, vracíme FMP data
-                if info.get('currentPrice'):
-                    return info
-
-        except Exception as e:
-            print(f"FMP Info Error: {e}")
-
-    # 2. CESTA: YAHOO FINANCE (Fallback - Nespolehlivé na Cloudu)
+    """Fetch basic info from Yahoo Finance."""
     try:
         t = yf.Ticker(ticker)
-        y_info = t.info
-        # Validace: Yahoo musí vrátit aspoň cenu A market cap, jinak je to k ničemu
-        if y_info and y_info.get('regularMarketPrice') and y_info.get('marketCap'):
-            return y_info
+        return t.info or {}
     except Exception:
-        pass
+        return {}
 
-    return info
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_price_history(ticker: str, period: str = "1y") -> pd.DataFrame:
@@ -675,116 +599,81 @@ def get_all_time_high(ticker: str) -> Optional[float]:
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def fetch_insider_transactions_fmp(ticker: str) -> Optional[pd.DataFrame]:
+def fetch_insider_transactions_fmp(ticker: str) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """Načte insider transakce z Financial Modeling Prep (FMP) přes *stable* endpoint.
+
+    Vrací:
+        (df, debug)
+
+    Poznámky:
+    - Debug nikdy neobsahuje celý API klíč (jen informaci, zda je načtený a jeho délku).
+    - Používá endpoint:
+        https://financialmodelingprep.com/stable/insider-trading/search
     """
-    FALLBACK: Načítá insider obchody scrapováním Finvizu (protože API jsou placená).
-    """
-    url = f"https://finviz.com/quote.ashx?t={ticker}"
-    # Finviz vyžaduje User-Agent, aby si myslel, že jsme prohlížeč
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-    
+    dbg: Dict[str, Any] = {
+        "provider": "FMP",
+        "endpoint": "stable/insider-trading/search",
+        "ticker": ticker,
+        "key_loaded": bool(FMP_API_KEY),
+        "key_len": len(FMP_API_KEY) if FMP_API_KEY else 0,
+        "url": None,
+        "status_code": None,
+        "items": 0,
+        "error": None,
+        "note": None,
+    }
+
+    # Bez klíče nemá smysl volat API
+    if not FMP_API_KEY:
+        dbg["error"] = "FMP_API_KEY není nastavený (Streamlit secrets / env)."
+        return pd.DataFrame(), dbg
+
+    base = "https://financialmodelingprep.com/stable"
+    # skutečný URL (se skutečným klíčem) používáme jen pro request; do debugu dáme maskovanou verzi
+    url = f"{base}/insider-trading/search?symbol={ticker}&page=0&limit=100&apikey={FMP_API_KEY}"
+    dbg["url"] = f"{base}/insider-trading/search?symbol={ticker}&page=0&limit=100&apikey=***"
+
     try:
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, timeout=15)
+        dbg["status_code"] = int(response.status_code)
+
         if response.status_code != 200:
-            return None
-        
-        # Pandas umí vycucnout všechny tabulky z HTML
-        # Tabulka insiderů je obvykle ta poslední na stránce Finvizu
-        dfs = pd.read_html(response.text)
-        
-        # Hledáme tabulku, která obsahuje slova 'Transaction' a 'SEC Form 4'
-        insider_df = None
-        for df in dfs:
-            if 'Transaction' in df.columns and 'SEC Form 4' in df.columns:
-                insider_df = df
-                break
-                
-        # Pokud jsme tabulku nenašli, zkusíme vzít poslední (často to tak je)
-        if insider_df is None and len(dfs) > 5:
-            insider_df = dfs[-1]
-            
-        if insider_df is None or insider_df.empty:
-            return pd.DataFrame()
+            # typicky 401/403 (klíč), 429 (rate limit), nebo message o upgradu
+            text = response.text or ""
+            dbg["error"] = text[:500] + ("..." if len(text) > 500 else "")
+            return pd.DataFrame(), dbg
 
-        # --- ČIŠTĚNÍ DAT Z FINVIZU ---
-        # Finviz má sloupce: [Owner, Relationship, Date, Transaction, Cost, #Shares, Value ($), #Shares Total, SEC Form 4]
-        
-        # Přejmenování pro kompatibilitu s tvým skriptem
+        data = response.json()
+        if not data:
+            dbg["items"] = 0
+            return pd.DataFrame(), dbg
+
+        df = pd.DataFrame(data)
+        dbg["items"] = int(len(df))
+
+        # Normalizace sloupců do formátu, který už appka očekává
         rename_map = {
-            'Date': 'Date',
-            'Transaction': 'Transaction',
-            'Relationship': 'Position',
-            'Value ($)': 'Value',
-            '#Shares': 'Shares',
-            'Cost': 'Price'
+            "transactionDate": "Date",
+            "transactionType": "Transaction",
+            "typeOfOwner": "Position",
+            "reportingName": "Reporting Name",
+            "filingDate": "Filing Date",
         }
-        
-        # Flexibilní přejmenování (ignoruje, co tam není)
-        insider_df = insider_df.rename(columns=rename_map)
-        
-        # Filtrujeme jen sloupce, které potřebujeme
-        needed_cols = ['Date', 'Transaction', 'Position', 'Value']
-        
-        # Pokud chybí Value, zkusíme ji dopočítat
-        if 'Value' not in insider_df.columns and 'Shares' in insider_df.columns and 'Price' in insider_df.columns:
-             # Čištění numerických dat (odstranění čárek)
-             def clean_num(x):
-                 if isinstance(x, str): return pd.to_numeric(x.replace(',', ''), errors='coerce')
-                 return x
-             
-             insider_df['Value'] = clean_num(insider_df['Shares']) * clean_num(insider_df['Price'])
+        for src, dst in rename_map.items():
+            if src in df.columns and dst not in df.columns:
+                df = df.rename(columns={src: dst})
 
-        # Finální formátování
-        # Finviz datum je např. "Feb 13", musíme přidat rok (odhadem aktuální rok)
-        def parse_finviz_date(d_str):
-            try:
-                # Přidáme aktuální rok, protože Finviz rok neuvádí
-                current_year = dt.datetime.now().year
-                return pd.to_datetime(f"{d_str} {current_year}", format="%b %d %Y")
-            except:
-                return pd.NaT
+        # Value = shares * price
+        if "securitiesTransacted" in df.columns and "price" in df.columns:
+            df["Value"] = pd.to_numeric(df["securitiesTransacted"], errors="coerce") * pd.to_numeric(df["price"], errors="coerce")
+        else:
+            df["Value"] = np.nan
 
-        insider_df['Date'] = insider_df['Date'].apply(parse_finviz_date)
-        
-        # Čištění sloupce Value (odstranění čárek)
-        if 'Value' in insider_df.columns:
-             insider_df['Value'] = insider_df['Value'].astype(str).str.replace(',', '').apply(pd.to_numeric, errors='coerce')
-
-        return insider_df
+        return df, dbg
 
     except Exception as e:
-        print(f"Finviz Scraper Error: {e}")
-        return pd.DataFrame() # Vrať prázdnou tabulku místo None, aby aplikace nepadala
-        
-        # --- FLEXIBILNÍ PŘEJMENOVÁNÍ ---
-        # FMP API vrací různé názvy sloupců v různých verzích
-        rename_map = {
-            'transactionDate': 'Date', 'transaction_date': 'Date',
-            'transactionType': 'Transaction', 'type': 'Transaction', 'acquistionOrDisposition': 'Transaction',
-            'officerTitle': 'Position', 'reportingName': 'Position',
-            'securitiesTransacted': 'Shares', 'securities_transacted': 'Shares',
-            'price': 'Price', 'priceAtTransaction': 'Price'
-        }
-        
-        df = df.rename(columns=rename_map)
-        
-        # Ověříme, zda máme klíčové sloupce, jinak je vytvoříme
-        required_cols = ['Date', 'Transaction', 'Position', 'Shares', 'Price']
-        for col in required_cols:
-            if col not in df.columns:
-                df[col] = 0 if col in ['Shares', 'Price'] else "N/A"
-
-        # Výpočet hodnoty (Value)
-        df['Value'] = pd.to_numeric(df['Shares'], errors='coerce') * pd.to_numeric(df['Price'], errors='coerce')
-        
-        # Filtrujeme jen relevantní sloupce
-        final_df = df[['Date', 'Transaction', 'Position', 'Value', 'Shares', 'Price']].dropna(subset=['Date'])
-        
-        return final_df
-
-    except Exception as e:
-        print(f"FMP API Error: {e}")
-        return None
+        dbg["error"] = f"{type(e).__name__}: {e}"
+        return pd.DataFrame(), dbg
 
 # ============================================================================
 # METRICS & SCORING
@@ -2203,7 +2092,7 @@ def main():
         
         # Advanced data
         ath = get_all_time_high(ticker)
-        insider_df = fetch_insider_transactions_fmp(ticker)
+        insider_df, fmp_insider_dbg = fetch_insider_transactions_fmp(ticker)
         insider_signal = compute_insider_pro_signal(insider_df)
         
         # DCF calculations
@@ -2438,6 +2327,19 @@ def main():
         # Insider signal
         st.markdown("---")
         st.markdown("#### 🔐 Insider Trading Signal")
+
+        # FMP key + rychlý debug (bez zobrazení klíče)
+        if fmp_insider_dbg.get("key_loaded"):
+            st.caption(
+                f"FMP API key: ✅ načteno (délka {fmp_insider_dbg.get('key_len', 0)}). "
+                f"HTTP: {fmp_insider_dbg.get('status_code', '—')} | záznamů: {fmp_insider_dbg.get('items', 0)}"
+            )
+        else:
+            st.warning("FMP API key: ❌ nenalezeno. Nastav `FMP_API_KEY` do Streamlit secrets nebo ENV.")
+
+        with st.expander("FMP Insider debug", expanded=False):
+            st.json(fmp_insider_dbg)
+
         
         ins1, ins2, ins3 = st.columns(3)
         with ins1:
@@ -2451,7 +2353,7 @@ def main():
         with ins3:
             st.metric("Prodeje (6M)", insider_signal.get('recent_sells', 0))
         
-        if insider_signal.get("marketCap"):
+        if insider_signal.get("cluster_detected"):
             st.markdown(
                 '<div class="success-box">🔥 <b>Cluster Buying Detected!</b> Více insiderů nakupuje současně - silný bullish signál.</div>',
                 unsafe_allow_html=True
