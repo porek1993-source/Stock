@@ -835,9 +835,11 @@ def _df_from_records(records: List[Dict[str, Any]], source: str) -> pd.DataFrame
 def _dedupe_insider_df(df: pd.DataFrame) -> pd.DataFrame:
     """Deduplicate merged insider transactions across providers.
 
-    Different providers may format the same trade slightly differently (whitespace, casing,
-    numeric types). This normalizes key fields, dedupes, and aggregates Source so you keep
-    provenance without double-counting.
+    Strategy:
+    - Normalize key fields (owner, code, transaction label, date, numeric rounding)
+    - If Price is missing for a row, dedupe on a core key without price so it can merge with
+      the same transaction from another provider that *does* include price.
+    - Aggregate Source as a comma-separated list of unique providers.
     """
     if df is None or df.empty:
         return pd.DataFrame() if df is None else df
@@ -867,7 +869,6 @@ def _dedupe_insider_df(df: pd.DataFrame) -> pd.DataFrame:
     d["_code_n"] = d["Code"].apply(_norm_text).str.upper()
     d["_tx_n"] = d["Transaction"].apply(_norm_text).str.lower()
 
-    # Numeric normalization
     def _to_num(x: Any) -> Optional[float]:
         try:
             v = safe_float(x)
@@ -883,13 +884,11 @@ def _dedupe_insider_df(df: pd.DataFrame) -> pd.DataFrame:
     d["_price_n"] = d["Price"].apply(_to_num)
     d["_value_n"] = d["Value"].apply(_to_num)
 
-    # Round to stabilize floating differences
     d["_shares_r"] = d["_shares_n"].round(0)
     d["_price_r"] = d["_price_n"].round(4)
     d["_value_r"] = d["_value_n"].round(2)
 
-    # Build dedupe key
-    d["_key"] = (
+    key_core = (
         d["Date"].astype(str)
         + "|"
         + d["_owner_n"]
@@ -899,9 +898,9 @@ def _dedupe_insider_df(df: pd.DataFrame) -> pd.DataFrame:
         + d["_tx_n"]
         + "|"
         + d["_shares_r"].astype(str)
-        + "|"
-        + d["_price_r"].astype(str)
     )
+    price_present = d["_price_n"].notna()
+    d["_key"] = np.where(price_present, key_core + "|" + d["_price_r"].astype(str), key_core)
 
     def _join_sources(s: pd.Series) -> str:
         vals = []
@@ -915,25 +914,40 @@ def _dedupe_insider_df(df: pd.DataFrame) -> pd.DataFrame:
                 uniq.append(v)
         return ", ".join(uniq) if uniq else ""
 
-    # Aggregate: keep first non-null for most fields, but join sources
+    def _first_non_null(s: pd.Series) -> Any:
+        for x in s.tolist():
+            if x is None:
+                continue
+            try:
+                if isinstance(x, float) and (math.isnan(x) or math.isinf(x)):
+                    continue
+            except Exception:
+                pass
+            if isinstance(x, str) and not x.strip():
+                continue
+            if pd.isna(x):
+                continue
+            return x
+        return None
+
     agg = {
         "Date": "first",
-        "Owner": "first",
-        "Position": "first",
-        "Code": "first",
-        "Security": "first",
-        "Shares": "first",
-        "Price": "first",
-        "Value": "first",
-        "Transaction": "first",
-        "FilingURL": "first",
+        "Owner": _first_non_null,
+        "Position": _first_non_null,
+        "Code": _first_non_null,
+        "Security": _first_non_null,
+        "Shares": _first_non_null,
+        "Price": _first_non_null,
+        "Value": _first_non_null,
+        "Transaction": _first_non_null,
+        "FilingURL": _first_non_null,
         "Source": _join_sources,
     }
 
     d2 = d.groupby("_key", dropna=False, as_index=False).agg(agg)
 
-    # Sort
     try:
+        d2["Date"] = pd.to_datetime(d2["Date"], errors="coerce").dt.date
         d2 = d2.sort_values("Date", ascending=False)
     except Exception:
         pass
@@ -1208,6 +1222,11 @@ def _fetch_insider_from_sec(ticker: str, max_filings: int = 12, max_transactions
     import xml.etree.ElementTree as ET
 
     rows: List[Dict[str, Any]] = []
+
+    filings_tried = 0
+    xml_fetched = 0
+    xml_parsed = 0
+    last_fetch_status = None
     headers_xml = (
         ("User-Agent", ua or "StockPickerPro/1.0"),
         ("Accept", "application/xml,text/xml,text/plain,*/*"),
@@ -1216,6 +1235,7 @@ def _fetch_insider_from_sec(ticker: str, max_filings: int = 12, max_transactions
 
     for i in idxs:
         try:
+            filings_tried += 1
             accession = str(accs[i])
             accession_nodash = accession.replace("-", "")
             filing_date = fdates[i] if i < len(fdates) else None
@@ -1223,6 +1243,7 @@ def _fetch_insider_from_sec(ticker: str, max_filings: int = 12, max_transactions
             # Use index.json to locate XML
             index_url = f"https://data.sec.gov/Archives/edgar/data/{cik_int}/{accession_nodash}/index.json"
             st_i, index_payload, err_i = _http_get_json(index_url, headers_json)
+            last_fetch_status = st_i
             if st_i != 200 or not isinstance(index_payload, dict):
                 # fallback: try primary document directly via submissions in older logic (skipped here)
                 continue
@@ -1233,8 +1254,10 @@ def _fetch_insider_from_sec(ticker: str, max_filings: int = 12, max_transactions
 
             filing_url = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession_nodash}/{xml_name}"
             st_x, xml_text, err_x = _http_get_text(filing_url, headers_xml)
+            last_fetch_status = st_x
             if st_x != 200 or not xml_text:
                 continue
+            xml_fetched += 1
 
             # parse XML
             if "<ownershipDocument" not in xml_text and "<nonDerivativeTransaction" not in xml_text:
@@ -1243,6 +1266,7 @@ def _fetch_insider_from_sec(ticker: str, max_filings: int = 12, max_transactions
                     continue
 
             root = ET.fromstring(xml_text.encode("utf-8", errors="ignore"))
+            xml_parsed += 1
 
             owner = None
             officer_title = None
@@ -1306,6 +1330,13 @@ def _fetch_insider_from_sec(ticker: str, max_filings: int = 12, max_transactions
     if not df.empty:
         df = df.sort_values("Date", ascending=False)
     meta["items"] = int(len(df))
+    meta["filings_tried"] = int(filings_tried)
+    meta["xml_fetched"] = int(xml_fetched)
+    meta["xml_parsed"] = int(xml_parsed)
+    if meta["items"] == 0 and filings_tried > 0:
+        meta["note"] = (meta.get("note") or "") + f" Parsed 0 transactions from {filings_tried} filings (xml fetched {xml_fetched}, parsed {xml_parsed})."
+    if last_fetch_status and meta["items"] == 0:
+        meta["last_http_status"] = int(last_fetch_status)
     return df, meta
 
 
@@ -1486,14 +1517,20 @@ def extract_metrics(info: Dict[str, Any], ticker: str) -> Dict[str, Metric]:
     gross_margin = safe_float(info.get("grossMargins"))
     
     # Growth
-    revenue_growth = safe_float(info.get("revenueGrowth"))
+    revenue_growth = safe_float(info.get("revenueGrowth") or info.get("revenueQuarterlyGrowth"))
     earnings_growth = safe_float(info.get("earningsGrowth"))
     earnings_quarterly_growth = safe_float(info.get("earningsQuarterlyGrowth"))
+    # Fallback: some tickers only have quarterly growth
+    if earnings_growth is None:
+        earnings_growth = earnings_quarterly_growth
     
     # Financial health
     current_ratio = safe_float(info.get("currentRatio"))
     quick_ratio = safe_float(info.get("quickRatio"))
     debt_to_equity = safe_float(info.get("debtToEquity"))
+    # Yahoo sometimes returns D/E as percentage points (e.g., 50 => 0.50)
+    if debt_to_equity is not None and debt_to_equity > 10 and debt_to_equity <= 500:
+        debt_to_equity = debt_to_equity / 100.0
     total_cash = safe_float(info.get("totalCash"))
     total_debt = safe_float(info.get("totalDebt"))
     
@@ -1565,7 +1602,8 @@ def _first_present(d: Dict[str, Any], keys: List[str]) -> Optional[float]:
                 return v
     return None
 
-@st.cache_data(show_spinner=False, ttl=86400)
+@st.cache_data(show_spinner=False, ttl=21600)
+
 def _fetch_fmp_ratios_ttm(ticker: str) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
     """FMP stable Ratios TTM.
 
@@ -1600,7 +1638,8 @@ def _fetch_fmp_ratios_ttm(ticker: str) -> Tuple[Optional[Dict[str, Any]], Dict[s
 
     return None, meta
 
-@st.cache_data(show_spinner=False, ttl=86400)
+@st.cache_data(show_spinner=False, ttl=21600)
+
 def _fetch_fmp_key_metrics_ttm(ticker: str) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
     """FMP stable Key Metrics TTM.
 
@@ -1633,7 +1672,8 @@ def _fetch_fmp_key_metrics_ttm(ticker: str) -> Tuple[Optional[Dict[str, Any]], D
 
     return None, meta
 
-@st.cache_data(show_spinner=False, ttl=86400)
+@st.cache_data(show_spinner=False, ttl=21600)
+
 def _fetch_alpha_overview(ticker: str) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
     meta = {"provider": "AlphaVantage", "endpoint": "query?function=OVERVIEW", "status": None, "error": None, "url": None}
     if not ALPHAVANTAGE_API_KEY:
@@ -1652,7 +1692,8 @@ def _fetch_alpha_overview(ticker: str) -> Tuple[Optional[Dict[str, Any]], Dict[s
         return None, meta
     return payload, meta
 
-@st.cache_data(show_spinner=False, ttl=86400)
+@st.cache_data(show_spinner=False, ttl=21600)
+
 def _fetch_finnhub_metric(ticker: str) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
     meta = {"provider": "Finnhub", "endpoint": "api/v1/stock/metric?metric=all", "status": None, "error": None, "url": None}
     if not FINNHUB_API_KEY:
@@ -1842,7 +1883,22 @@ def enrich_metrics_multisource(ticker: str, metrics: Dict[str, Metric], info: Di
             if _is_missing("earnings_growth"):
                 _set("earnings_growth", _first_present(fh, ["epsGrowthTTM", "epsGrowth5Y"]), "Finnhub", pct=True)
 
-    # If still missing, keep as None; UI will show —
+    
+    # --- Step 5: Derived fallbacks (no extra API calls) ---
+    # Derive PEG from P/E and earnings growth if missing.
+    try:
+        if _is_missing("peg") and (not _is_missing("pe")) and (not _is_missing("earnings_growth")):
+            pe_v = safe_float(metrics.get("pe").value if metrics.get("pe") else None)
+            eg_v = safe_float(metrics.get("earnings_growth").value if metrics.get("earnings_growth") else None)
+            if pe_v is not None and eg_v is not None and eg_v > 0:
+                # eg_v is stored as 0-1 (preferred). Convert to percent for PEG convention.
+                growth_pct = eg_v * 100.0 if abs(eg_v) <= 1.5 else eg_v
+                if growth_pct > 0:
+                    _set("peg", pe_v / growth_pct, "Derived")
+    except Exception:
+        pass
+
+# If still missing, keep as None; UI will show —
     missing_left = [k for k in wanted if _is_missing(k)]
     if missing_left:
         debug["steps"].append({"missing_after_fallbacks": missing_left})
