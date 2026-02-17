@@ -282,6 +282,55 @@ MACRO_CALENDAR = [
 # UTILITIES & QUANT LOGIC
 # ============================================================================
 
+
+# --- FMP HELPERS (Hybridní Data Engine) ---
+def _fmp_get_json(endpoint: str) -> Optional[Any]:
+    if not FMP_API_KEY: return None
+    try:
+        url = f"https://financialmodelingprep.com/api/v3/{endpoint}?apikey={FMP_API_KEY}"
+        return requests.get(url).json()
+    except: return None
+
+def enrich_metrics_with_fmp(ticker: str, metrics: Dict[str, Metric]) -> Tuple[Dict[str, Metric], List[str]]:
+    """Doplní chybějící metriky (P/E, Debt, FCF Yield) z FMP, pokud Yahoo selže."""
+    notes = []
+    if not FMP_API_KEY: return metrics, notes
+
+    # 1. Ratios TTM (P/E, Current Ratio, Debt/Equity, ROE, Marže)
+    ratios = _fmp_get_json(f"ratios-ttm/{ticker}")
+    if ratios and isinstance(ratios, list):
+        r = ratios[0]
+        # P/E
+        if metrics.get("pe") and metrics["pe"].value is None:
+            metrics["pe"].value = safe_float(r.get("peRatioTTM"))
+            metrics["pe"].source = "FMP (Backup)"
+            notes.append("P/E doplněno z FMP")
+        # Current Ratio
+        if metrics.get("current_ratio") and metrics["current_ratio"].value is None:
+            metrics["current_ratio"].value = safe_float(r.get("currentRatioTTM"))
+        # Debt/Equity
+        if metrics.get("debt_to_equity") and metrics["debt_to_equity"].value is None:
+            metrics["debt_to_equity"].value = safe_float(r.get("debtToEquityTTM"))
+        # ROE
+        if metrics.get("roe") and metrics["roe"].value is None:
+            metrics["roe"].value = safe_float(r.get("returnOnEquityTTM"))
+        # Operating Margin
+        if metrics.get("operating_margin") and metrics["operating_margin"].value is None:
+            metrics["operating_margin"].value = safe_float(r.get("operatingProfitMarginTTM"))
+
+    # 2. Key Metrics TTM (FCF Yield)
+    km = _fmp_get_json(f"key-metrics-ttm/{ticker}")
+    if km and isinstance(km, list):
+        k = km[0]
+        if metrics.get("fcf_yield") and metrics["fcf_yield"].value is None:
+            metrics["fcf_yield"].value = safe_float(k.get("freeCashFlowYieldTTM"))
+            metrics["fcf_yield"].source = "FMP (Backup)"
+            notes.append("FCF Yield doplněn z FMP")
+            
+    return metrics, notes
+
+
+
 def calculate_roic(info: Dict[str, Any]) -> Optional[float]:
     """Aproximace ROIC: NOPAT / (Debt + Equity)."""
     try:
@@ -1645,6 +1694,8 @@ def get_advanced_verdict(
 # ============================================================================
 
 
+
+
 def render_twitter_timeline(handle: str, height: int = 600) -> None:
     """Render X/Twitter content without embeds (widgets are often blocked)."""
     handle = (handle or "").lstrip("@").strip()
@@ -2164,8 +2215,19 @@ def main():
             st.stop()
         
         company = info.get("longName") or info.get("shortName") or ticker
-        metrics = extract_metrics(info, ticker)
+       metrics = extract_metrics(info, ticker)
+
+        # --- NOVÉ: HYBRID FIX (Doplnění dat z FMP) ---
+        # Pokud máš nastavený FMP_API_KEY, pokusí se najít chybějící P/E, Debt atd.
+        metrics, fmp_notes = enrich_metrics_with_fmp(ticker, metrics)
+        
+        # Volitelně: Zobrazit info, že se data doplnila
+        if fmp_notes and st.sidebar.checkbox("Show Data Source Info", value=False):
+            st.sidebar.success(f"Doplněno z FMP: {', '.join(fmp_notes)}")
+        # -----------------------------------------------
+
         price_history = fetch_price_history(ticker, period="1y")
+       
         income, balance, cashflow = fetch_financials(ticker)
         
         # Advanced data
