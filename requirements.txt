@@ -5,6 +5,7 @@ requests>=2.31
 plotly>=5.22
 yfinance>=0.2.43
 hmmlearn
+plotly
 # AI (Gemini) – nové SDK
 google-genai>=0.3.0
 
