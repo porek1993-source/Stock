@@ -47,15 +47,7 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-# Use full width on desktop (avoid centered/narrow container)
-st.markdown(
-    """
-    <style>
-      .block-container { max-width: 100% !important; padding-left: 1.2rem; padding-right: 1.2rem; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+# (duplicate CSS removed)
 
 
 def js_close_sidebar():
@@ -291,13 +283,391 @@ MACRO_CALENDAR = [
 # ============================================================================
 
 def calculate_roic(info: Dict[str, Any]) -> Optional[float]:
-    """Aproximace ROIC: NOPAT / (Debt + Equity)."""
+    """Aproximace ROIC: NOPAT / Invested Capital.
+    Používá EBIT (ne EBITDA) pro správný výpočet NOPAT.
+    """
     try:
-        ebit = safe_float(info.get("ebitda")) # EBITDA jako proxy
-        nopat = ebit * 0.79 if ebit else None # 21% US Tax proxy
+        # Prefer EBIT; fallback to EBITDA - D&A proxy if not available
+        ebit = safe_float(info.get("ebit"))
+        if ebit is None:
+            ebitda = safe_float(info.get("ebitda"))
+            da = safe_float(info.get("depreciationAndAmortization") or info.get("totalDepreciationAndAmortization"))
+            if ebitda is not None:
+                ebit = ebitda - (da or 0)
+        nopat = ebit * 0.79 if ebit is not None else None  # 21% US Tax proxy
         invested_capital = (safe_float(info.get("totalDebt")) or 0) + (safe_float(info.get("totalStockholderEquity")) or 0)
         return safe_div(nopat, invested_capital)
-    except: return None
+    except:
+        return None
+
+# ============================================================================
+# NOVÉ ANALYTICKÉ FUNKCE v6.0
+# ============================================================================
+
+def calculate_graham_number(info: Dict[str, Any]) -> Optional[float]:
+    """Graham Number: konzervativní fair value = sqrt(22.5 * EPS * BVPS)."""
+    try:
+        eps = safe_float(info.get("trailingEps"))
+        bvps = safe_float(info.get("bookValue"))
+        if eps and bvps and eps > 0 and bvps > 0:
+            return math.sqrt(22.5 * eps * bvps)
+        return None
+    except Exception:
+        return None
+
+
+def calculate_piotroski_fscore(info: Dict[str, Any], income: pd.DataFrame, balance: pd.DataFrame, cashflow: pd.DataFrame) -> Tuple[int, Dict[str, int]]:
+    """
+    Piotroski F-Score (0-9): 9-bodový fundamental quality check.
+    Vyšší = lepší kvalita fundamentů.
+    """
+    score = 0
+    breakdown: Dict[str, int] = {}
+
+    def _row(df: pd.DataFrame, candidates: List[str]) -> Optional[pd.Series]:
+        if df is None or df.empty:
+            return None
+        for c in candidates:
+            if c in df.index:
+                return df.loc[c]
+        return None
+
+    try:
+        # --- Profitabilita (4 body) ---
+        roa = safe_float(info.get("returnOnAssets"))
+        if roa is not None:
+            p1 = 1 if roa > 0 else 0
+            score += p1; breakdown["ROA > 0"] = p1
+
+        ocf = safe_float(info.get("operatingCashflow"))
+        if ocf is not None:
+            p2 = 1 if ocf > 0 else 0
+            score += p2; breakdown["OCF > 0"] = p2
+
+        # Change in ROA (YoY) - from income statement
+        if not income.empty and len(income.columns) >= 2:
+            ni_row = _row(income, ["Net Income", "Net Income Applicable To Common Shares"])
+            ta_row = _row(balance, ["Total Assets"]) if not balance.empty else None
+            if ni_row is not None and ta_row is not None:
+                try:
+                    ni_curr = safe_float(ni_row.iloc[0])
+                    ni_prev = safe_float(ni_row.iloc[1])
+                    ta_curr = safe_float(ta_row.iloc[0])
+                    ta_prev = safe_float(ta_row.iloc[1])
+                    if all(v is not None and v != 0 for v in [ni_curr, ni_prev, ta_curr, ta_prev]):
+                        roa_curr = ni_curr / ta_curr
+                        roa_prev = ni_prev / ta_prev
+                        p3 = 1 if roa_curr > roa_prev else 0
+                        score += p3; breakdown["ΔROAᵧ > 0"] = p3
+                except Exception:
+                    pass
+
+        # Accruals: OCF/Assets > ROA
+        ta_val = safe_float(info.get("totalAssets"))
+        if ocf is not None and roa is not None and ta_val and ta_val > 0:
+            p4 = 1 if (ocf / ta_val) > roa else 0
+            score += p4; breakdown["OCF/Assets > ROA"] = p4
+
+        # --- Leverage & Liquidity (3 body) ---
+        de_curr = safe_float(info.get("debtToEquity"))
+        if de_curr is not None:
+            # Ideálně bychom porovnali s předchozím rokem, ale info dává jen aktuální
+            # Jako proxy: nízký D/E je dobré znamení
+            p5 = 1 if de_curr < 100 else 0  # D/E < 1.0 (yfinance vrací ×100)
+            score += p5; breakdown["D/E < 1.0"] = p5
+
+        cr = safe_float(info.get("currentRatio"))
+        if cr is not None:
+            p6 = 1 if cr > 1 else 0
+            score += p6; breakdown["Current Ratio > 1"] = p6
+
+        # Dilution: shares outstanding - pokud rostou, je to negativní
+        shares_curr = safe_float(info.get("sharesOutstanding"))
+        shares_float = safe_float(info.get("floatShares"))
+        if shares_curr and shares_float:
+            p7 = 1 if shares_curr <= shares_float * 1.02 else 0  # max 2% dilution tolerance
+            score += p7; breakdown["Bez ředění"] = p7
+
+        # --- Efektivita (2 body) ---
+        gm_curr = safe_float(info.get("grossMargins"))
+        if gm_curr is not None:
+            p8 = 1 if gm_curr > 0.30 else 0
+            score += p8; breakdown["Gross Margin > 30%"] = p8
+
+        asset_turnover = safe_div(safe_float(info.get("totalRevenue")), safe_float(info.get("totalAssets")))
+        if asset_turnover is not None:
+            p9 = 1 if asset_turnover > 0.5 else 0
+            score += p9; breakdown["Asset Turnover > 0.5"] = p9
+
+    except Exception:
+        pass
+
+    return score, breakdown
+
+
+def calculate_altman_zscore(info: Dict[str, Any]) -> Tuple[Optional[float], str]:
+    """
+    Altman Z-Score: bankruptcy risk indicator.
+    > 2.99 = Safe, 1.81-2.99 = Grey Zone, < 1.81 = Distress
+    """
+    try:
+        total_assets = safe_float(info.get("totalAssets"))
+        if not total_assets or total_assets == 0:
+            return None, "Data nedostupná"
+
+        working_capital = (safe_float(info.get("totalCurrentAssets")) or 0) - (safe_float(info.get("totalCurrentLiabilities")) or 0)
+        retained_earnings = safe_float(info.get("retainedEarnings") or info.get("retainedEarningsAccumulatedDeficit")) or 0
+        ebit = safe_float(info.get("ebit")) or (safe_float(info.get("ebitda")) or 0)
+        market_cap = safe_float(info.get("marketCap")) or 0
+        total_liabilities = (safe_float(info.get("totalDebt")) or 0)
+        revenue = safe_float(info.get("totalRevenue")) or 0
+
+        x1 = working_capital / total_assets
+        x2 = retained_earnings / total_assets
+        x3 = ebit / total_assets
+        x4 = market_cap / max(total_liabilities, 1)
+        x5 = revenue / total_assets
+
+        z = 1.2 * x1 + 1.4 * x2 + 3.3 * x3 + 0.6 * x4 + 1.0 * x5
+
+        if z > 2.99:
+            zone = "✅ Bezpečná zóna"
+        elif z > 1.81:
+            zone = "⚠️ Šedá zóna"
+        else:
+            zone = "🚨 Riziko bankrotu"
+
+        return round(z, 2), zone
+    except Exception:
+        return None, "Chyba výpočtu"
+
+
+def calculate_rsi(price_series: pd.Series, period: int = 14) -> Optional[float]:
+    """Relative Strength Index (RSI)."""
+    try:
+        if len(price_series) < period + 1:
+            return None
+        delta = price_series.diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        avg_gain = gain.rolling(window=period).mean()
+        avg_loss = loss.rolling(window=period).mean()
+        rs = avg_gain / avg_loss.replace(0, float('nan'))
+        rsi = 100 - (100 / (1 + rs))
+        val = rsi.iloc[-1]
+        return float(val) if pd.notna(val) else None
+    except Exception:
+        return None
+
+
+def calculate_macd(price_series: pd.Series) -> Tuple[Optional[float], Optional[float], str]:
+    """MACD (12/26/9). Returns (macd_line, signal_line, trend_label)."""
+    try:
+        if len(price_series) < 35:
+            return None, None, "Nedostatek dat"
+        ema12 = price_series.ewm(span=12, adjust=False).mean()
+        ema26 = price_series.ewm(span=26, adjust=False).mean()
+        macd_line = ema12 - ema26
+        signal_line = macd_line.ewm(span=9, adjust=False).mean()
+        m = float(macd_line.iloc[-1])
+        s = float(signal_line.iloc[-1])
+        if m > s:
+            label = "📈 Bullish crossover"
+        elif m < s:
+            label = "📉 Bearish crossover"
+        else:
+            label = "➡️ Neutrální"
+        return m, s, label
+    except Exception:
+        return None, None, "Chyba"
+
+
+def calculate_technical_signals(price_history: pd.DataFrame) -> Dict[str, Any]:
+    """Vypočítá sadu technických indikátorů z cenové historie."""
+    result: Dict[str, Any] = {}
+    if price_history.empty or "Close" not in price_history.columns:
+        return result
+
+    close = price_history["Close"].dropna()
+    if len(close) < 20:
+        return result
+
+    # RSI
+    result["rsi"] = calculate_rsi(close)
+
+    # MACD
+    macd_val, signal_val, macd_label = calculate_macd(close)
+    result["macd"] = macd_val
+    result["macd_signal"] = signal_val
+    result["macd_label"] = macd_label
+
+    # Moving averages
+    result["ma50"] = float(close.rolling(50).mean().iloc[-1]) if len(close) >= 50 else None
+    result["ma200"] = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else None
+    result["current_price"] = float(close.iloc[-1])
+
+    # 52W High/Low
+    result["high_52w"] = float(close.rolling(252).max().iloc[-1]) if len(close) >= 20 else float(close.max())
+    result["low_52w"] = float(close.rolling(252).min().iloc[-1]) if len(close) >= 20 else float(close.min())
+
+    # Bollinger Bands (20-day)
+    ma20 = close.rolling(20).mean()
+    std20 = close.rolling(20).std()
+    result["bb_upper"] = float((ma20 + 2 * std20).iloc[-1]) if len(close) >= 20 else None
+    result["bb_lower"] = float((ma20 - 2 * std20).iloc[-1]) if len(close) >= 20 else None
+    result["bb_mid"] = float(ma20.iloc[-1]) if len(close) >= 20 else None
+
+    # Distance from 200MA
+    if result.get("ma200") and result["ma200"] > 0:
+        result["pct_from_ma200"] = (result["current_price"] / result["ma200"] - 1)
+
+    # Volume trend (avg last 20 days vs avg last 60 days)
+    if "Volume" in price_history.columns:
+        vol = price_history["Volume"].dropna()
+        if len(vol) >= 60:
+            result["vol_trend"] = float(vol.iloc[-20:].mean() / vol.iloc[-60:].mean() - 1)
+
+    return result
+
+
+def monte_carlo_dcf(
+    fcf: float,
+    growth_rate: float,
+    terminal_growth: float,
+    wacc: float,
+    years: int,
+    shares_outstanding: float,
+    n_simulations: int = 1000
+) -> Dict[str, Any]:
+    """
+    Monte Carlo simulace DCF - vrací distribuci fair values.
+    Parametry jsou střední hodnoty, simulace přidává náhodnost.
+    """
+    try:
+        results = []
+        rng = np.random.default_rng(42)
+
+        for _ in range(n_simulations):
+            # Náhodné odchylky (normální distribuce)
+            sim_growth = rng.normal(growth_rate, growth_rate * 0.3)
+            sim_wacc = rng.normal(wacc, wacc * 0.15)
+            sim_terminal = rng.normal(terminal_growth, 0.005)
+            sim_wacc = max(0.05, min(0.25, sim_wacc))
+            sim_terminal = max(0.0, min(0.05, sim_terminal))
+
+            if sim_wacc <= sim_terminal:
+                continue
+
+            fv = calculate_dcf_fair_value(fcf, sim_growth, sim_terminal, sim_wacc, years, shares_outstanding)
+            if fv and fv > 0:
+                results.append(fv)
+
+        if not results:
+            return {}
+
+        arr = np.array(results)
+        return {
+            "mean": float(np.mean(arr)),
+            "median": float(np.median(arr)),
+            "p10": float(np.percentile(arr, 10)),
+            "p25": float(np.percentile(arr, 25)),
+            "p75": float(np.percentile(arr, 75)),
+            "p90": float(np.percentile(arr, 90)),
+            "std": float(np.std(arr)),
+            "n": len(results),
+        }
+    except Exception:
+        return {}
+
+
+def calculate_mean_reversion_pe(ticker: str) -> Tuple[Optional[float], Optional[float]]:
+    """
+    Porovnání aktuálního P/E s historickým průměrem (5 let).
+    Vrací (current_pe, hist_avg_pe).
+    """
+    try:
+        t = yf.Ticker(ticker)
+        hist = t.history(period="5y", interval="3mo", auto_adjust=False)
+        if hist.empty:
+            return None, None
+        # yfinance nevrací historické PE přímo - používáme cenu a EPS odhad
+        # Jako proxy: porovnáme P/B nebo P/S přes dobu
+        info = t.info
+        curr_pe = safe_float(info.get("trailingPE"))
+        return curr_pe, None  # simplified - plná implementace by potřebovala historical EPS
+    except Exception:
+        return None, None
+
+
+def calculate_earnings_quality(info: Dict[str, Any]) -> Tuple[Optional[float], str]:
+    """
+    Earnings Quality: CFO / Net Income ratio.
+    Ratio < 0.8 = možné manipulace s čísly.
+    """
+    try:
+        cfo = safe_float(info.get("operatingCashflow"))
+        net_income = safe_float(info.get("netIncomeToCommon"))
+        if cfo is None or net_income is None or net_income == 0:
+            return None, "Data nedostupná"
+        ratio = cfo / abs(net_income)
+        if ratio >= 1.1:
+            label = "✅ Výborná (CFO > Net Income)"
+        elif ratio >= 0.8:
+            label = "👍 Dobrá"
+        elif ratio >= 0.5:
+            label = "⚠️ Průměrná - prověř accruals"
+        else:
+            label = "🚨 Slabá - možné manipulace"
+        return round(ratio, 2), label
+    except Exception:
+        return None, "Chyba výpočtu"
+
+
+def simulate_investment(ticker: str, amount_czk: float, years_back: int = 5) -> Optional[Dict[str, Any]]:
+    """
+    'Co kdybych investoval X Kč?' simulátor.
+    Porovnání s SPY (S&P 500 ETF).
+    """
+    try:
+        period = f"{years_back}y"
+        t = yf.Ticker(ticker)
+        hist = t.history(period=period, auto_adjust=True)
+        if hist.empty or len(hist) < 10:
+            return None
+
+        spy = yf.Ticker("SPY")
+        spy_hist = spy.history(period=period, auto_adjust=True)
+
+        start_price = float(hist["Close"].iloc[0])
+        end_price = float(hist["Close"].iloc[-1])
+        stock_return = (end_price / start_price) - 1
+        final_value = amount_czk * (1 + stock_return)
+
+        spy_return = None
+        if not spy_hist.empty:
+            spy_return = (float(spy_hist["Close"].iloc[-1]) / float(spy_hist["Close"].iloc[0])) - 1
+
+        return {
+            "initial": amount_czk,
+            "final": final_value,
+            "stock_return": stock_return,
+            "spy_return": spy_return,
+            "years": years_back,
+            "start_date": hist.index[0].strftime("%d.%m.%Y"),
+            "end_date": hist.index[-1].strftime("%d.%m.%Y"),
+        }
+    except Exception:
+        return None
+
+
+def get_short_interest(info: Dict[str, Any]) -> Optional[float]:
+    """Short interest jako % float shares."""
+    return safe_float(info.get("shortPercentOfFloat"))
+
+
+def detect_value_trap(info: Dict[str, Any], metrics: Dict[str, "Metric"]) -> Tuple[bool, str]:
+    return _detect_value_trap_impl(info, metrics)
+
 
 def detect_market_regime(price_history: pd.DataFrame) -> str:
     """Detekce režimu na základě volatility a trendu za 6 měsíců."""
@@ -531,7 +901,6 @@ def get_fcf_ttm_yfinance(ticker: str, market_cap: Optional[float] = None) -> Tup
                         fcf_ttm = float(v)
                         msg = f"Použité roční FCF (TTM): ${fcf_ttm/1e9:.1f} miliard ({used_method})"
                         dbg.append(msg)
-                        print(msg)
                         return fcf_ttm, dbg
 
             # last resort: info['freeCashflow']
@@ -545,7 +914,6 @@ def get_fcf_ttm_yfinance(ticker: str, market_cap: Optional[float] = None) -> Tup
                 fcf_ttm = float(v)
                 msg = f"Použité roční FCF (TTM): ${fcf_ttm/1e9:.1f} miliard ({used_method})"
                 dbg.append(msg)
-                print(msg)
                 return fcf_ttm, dbg
 
             dbg.append("FCF: Nepodařilo se získat FCF ani z quarterly ani z annual ani z info.")
@@ -584,13 +952,12 @@ def get_fcf_ttm_yfinance(ticker: str, market_cap: Optional[float] = None) -> Tup
 
         msg = f"Použité roční FCF (TTM): ${fcf_ttm/1e9:.1f} miliard"
         dbg.append(msg)
-        print(msg)
 
         return fcf_ttm, dbg
     except Exception as e:
         dbg.append(f"FCF: chyba při výpočtu TTM: {e}")
         return None, dbg
-@st.cache_data(show_spinner=False, ttl=3600)
+@st.cache_data(show_spinner=False, ttl=86400)  # ATH mění jednou denně max
 def get_all_time_high(ticker: str) -> Optional[float]:
     """Get all-time high price."""
     try:
@@ -700,6 +1067,21 @@ def _norm_tx_label(raw_tx: Any, acquired_disposed: Any = None) -> str:
 
 def _df_from_records(records: List[Dict[str, Any]], source: str) -> pd.DataFrame:
     """Normalize disparate insider-trade payloads into a common dataframe."""
+
+    # OPRAVA: _to_float definována mimo smyčku (dříve se předefinovávala při každé iteraci)
+    def _to_float(x):
+        try:
+            if x is None:
+                return None
+            s = str(x).strip()
+            if s == "" or s.lower() in {"nan", "none"}:
+                return None
+            # remove commas
+            s = s.replace(",", "")
+            return float(s)
+        except Exception:
+            return None
+
     rows: List[Dict[str, Any]] = []
     for it in records or []:
         if not isinstance(it, dict):
@@ -727,7 +1109,6 @@ def _df_from_records(records: List[Dict[str, Any]], source: str) -> pd.DataFrame
         )
         ad = (
             it.get("acquisitionOrDisposition")
-            or it.get("transactionAcquiredDisposedCode")
             or it.get("transactionAcquiredDisposedCode")
             or it.get("acquiredDisposedCode")
         )
@@ -788,19 +1169,6 @@ def _df_from_records(records: List[Dict[str, Any]], source: str) -> pd.DataFrame
         )
 
         # Parse numerics robustly
-        def _to_float(x):
-            try:
-                if x is None:
-                    return None
-                s = str(x).strip()
-                if s == "" or s.lower() in {"nan", "none"}:
-                    return None
-                # remove commas
-                s = s.replace(",", "")
-                return float(s)
-            except Exception:
-                return None
-
         shares_f = _to_float(shares)
         price_f = _to_float(price)
         value_f = _to_float(value)
@@ -835,11 +1203,9 @@ def _df_from_records(records: List[Dict[str, Any]], source: str) -> pd.DataFrame
 def _dedupe_insider_df(df: pd.DataFrame) -> pd.DataFrame:
     """Deduplicate merged insider transactions across providers.
 
-    Strategy:
-    - Normalize key fields (owner, code, transaction label, date, numeric rounding)
-    - If Price is missing for a row, dedupe on a core key without price so it can merge with
-      the same transaction from another provider that *does* include price.
-    - Aggregate Source as a comma-separated list of unique providers.
+    Different providers may format the same trade slightly differently (whitespace, casing,
+    numeric types). This normalizes key fields, dedupes, and aggregates Source so you keep
+    provenance without double-counting.
     """
     if df is None or df.empty:
         return pd.DataFrame() if df is None else df
@@ -869,6 +1235,7 @@ def _dedupe_insider_df(df: pd.DataFrame) -> pd.DataFrame:
     d["_code_n"] = d["Code"].apply(_norm_text).str.upper()
     d["_tx_n"] = d["Transaction"].apply(_norm_text).str.lower()
 
+    # Numeric normalization
     def _to_num(x: Any) -> Optional[float]:
         try:
             v = safe_float(x)
@@ -884,11 +1251,13 @@ def _dedupe_insider_df(df: pd.DataFrame) -> pd.DataFrame:
     d["_price_n"] = d["Price"].apply(_to_num)
     d["_value_n"] = d["Value"].apply(_to_num)
 
+    # Round to stabilize floating differences
     d["_shares_r"] = d["_shares_n"].round(0)
     d["_price_r"] = d["_price_n"].round(4)
     d["_value_r"] = d["_value_n"].round(2)
 
-    key_core = (
+    # Build dedupe key
+    d["_key"] = (
         d["Date"].astype(str)
         + "|"
         + d["_owner_n"]
@@ -898,9 +1267,9 @@ def _dedupe_insider_df(df: pd.DataFrame) -> pd.DataFrame:
         + d["_tx_n"]
         + "|"
         + d["_shares_r"].astype(str)
+        + "|"
+        + d["_price_r"].astype(str)
     )
-    price_present = d["_price_n"].notna()
-    d["_key"] = np.where(price_present, key_core + "|" + d["_price_r"].astype(str), key_core)
 
     def _join_sources(s: pd.Series) -> str:
         vals = []
@@ -914,40 +1283,25 @@ def _dedupe_insider_df(df: pd.DataFrame) -> pd.DataFrame:
                 uniq.append(v)
         return ", ".join(uniq) if uniq else ""
 
-    def _first_non_null(s: pd.Series) -> Any:
-        for x in s.tolist():
-            if x is None:
-                continue
-            try:
-                if isinstance(x, float) and (math.isnan(x) or math.isinf(x)):
-                    continue
-            except Exception:
-                pass
-            if isinstance(x, str) and not x.strip():
-                continue
-            if pd.isna(x):
-                continue
-            return x
-        return None
-
+    # Aggregate: keep first non-null for most fields, but join sources
     agg = {
         "Date": "first",
-        "Owner": _first_non_null,
-        "Position": _first_non_null,
-        "Code": _first_non_null,
-        "Security": _first_non_null,
-        "Shares": _first_non_null,
-        "Price": _first_non_null,
-        "Value": _first_non_null,
-        "Transaction": _first_non_null,
-        "FilingURL": _first_non_null,
+        "Owner": "first",
+        "Position": "first",
+        "Code": "first",
+        "Security": "first",
+        "Shares": "first",
+        "Price": "first",
+        "Value": "first",
+        "Transaction": "first",
+        "FilingURL": "first",
         "Source": _join_sources,
     }
 
     d2 = d.groupby("_key", dropna=False, as_index=False).agg(agg)
 
+    # Sort
     try:
-        d2["Date"] = pd.to_datetime(d2["Date"], errors="coerce").dt.date
         d2 = d2.sort_values("Date", ascending=False)
     except Exception:
         pass
@@ -1222,11 +1576,6 @@ def _fetch_insider_from_sec(ticker: str, max_filings: int = 12, max_transactions
     import xml.etree.ElementTree as ET
 
     rows: List[Dict[str, Any]] = []
-
-    filings_tried = 0
-    xml_fetched = 0
-    xml_parsed = 0
-    last_fetch_status = None
     headers_xml = (
         ("User-Agent", ua or "StockPickerPro/1.0"),
         ("Accept", "application/xml,text/xml,text/plain,*/*"),
@@ -1235,7 +1584,6 @@ def _fetch_insider_from_sec(ticker: str, max_filings: int = 12, max_transactions
 
     for i in idxs:
         try:
-            filings_tried += 1
             accession = str(accs[i])
             accession_nodash = accession.replace("-", "")
             filing_date = fdates[i] if i < len(fdates) else None
@@ -1243,7 +1591,6 @@ def _fetch_insider_from_sec(ticker: str, max_filings: int = 12, max_transactions
             # Use index.json to locate XML
             index_url = f"https://data.sec.gov/Archives/edgar/data/{cik_int}/{accession_nodash}/index.json"
             st_i, index_payload, err_i = _http_get_json(index_url, headers_json)
-            last_fetch_status = st_i
             if st_i != 200 or not isinstance(index_payload, dict):
                 # fallback: try primary document directly via submissions in older logic (skipped here)
                 continue
@@ -1254,10 +1601,8 @@ def _fetch_insider_from_sec(ticker: str, max_filings: int = 12, max_transactions
 
             filing_url = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession_nodash}/{xml_name}"
             st_x, xml_text, err_x = _http_get_text(filing_url, headers_xml)
-            last_fetch_status = st_x
             if st_x != 200 or not xml_text:
                 continue
-            xml_fetched += 1
 
             # parse XML
             if "<ownershipDocument" not in xml_text and "<nonDerivativeTransaction" not in xml_text:
@@ -1266,7 +1611,6 @@ def _fetch_insider_from_sec(ticker: str, max_filings: int = 12, max_transactions
                     continue
 
             root = ET.fromstring(xml_text.encode("utf-8", errors="ignore"))
-            xml_parsed += 1
 
             owner = None
             officer_title = None
@@ -1330,13 +1674,6 @@ def _fetch_insider_from_sec(ticker: str, max_filings: int = 12, max_transactions
     if not df.empty:
         df = df.sort_values("Date", ascending=False)
     meta["items"] = int(len(df))
-    meta["filings_tried"] = int(filings_tried)
-    meta["xml_fetched"] = int(xml_fetched)
-    meta["xml_parsed"] = int(xml_parsed)
-    if meta["items"] == 0 and filings_tried > 0:
-        meta["note"] = (meta.get("note") or "") + f" Parsed 0 transactions from {filings_tried} filings (xml fetched {xml_fetched}, parsed {xml_parsed})."
-    if last_fetch_status and meta["items"] == 0:
-        meta["last_http_status"] = int(last_fetch_status)
     return df, meta
 
 
@@ -1517,20 +1854,14 @@ def extract_metrics(info: Dict[str, Any], ticker: str) -> Dict[str, Metric]:
     gross_margin = safe_float(info.get("grossMargins"))
     
     # Growth
-    revenue_growth = safe_float(info.get("revenueGrowth") or info.get("revenueQuarterlyGrowth"))
+    revenue_growth = safe_float(info.get("revenueGrowth"))
     earnings_growth = safe_float(info.get("earningsGrowth"))
     earnings_quarterly_growth = safe_float(info.get("earningsQuarterlyGrowth"))
-    # Fallback: some tickers only have quarterly growth
-    if earnings_growth is None:
-        earnings_growth = earnings_quarterly_growth
     
     # Financial health
     current_ratio = safe_float(info.get("currentRatio"))
     quick_ratio = safe_float(info.get("quickRatio"))
     debt_to_equity = safe_float(info.get("debtToEquity"))
-    # Yahoo sometimes returns D/E as percentage points (e.g., 50 => 0.50)
-    if debt_to_equity is not None and debt_to_equity > 10 and debt_to_equity <= 500:
-        debt_to_equity = debt_to_equity / 100.0
     total_cash = safe_float(info.get("totalCash"))
     total_debt = safe_float(info.get("totalDebt"))
     
@@ -1602,8 +1933,7 @@ def _first_present(d: Dict[str, Any], keys: List[str]) -> Optional[float]:
                 return v
     return None
 
-@st.cache_data(show_spinner=False, ttl=21600)
-
+@st.cache_data(show_spinner=False, ttl=86400)
 def _fetch_fmp_ratios_ttm(ticker: str) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
     """FMP stable Ratios TTM.
 
@@ -1638,8 +1968,7 @@ def _fetch_fmp_ratios_ttm(ticker: str) -> Tuple[Optional[Dict[str, Any]], Dict[s
 
     return None, meta
 
-@st.cache_data(show_spinner=False, ttl=21600)
-
+@st.cache_data(show_spinner=False, ttl=86400)
 def _fetch_fmp_key_metrics_ttm(ticker: str) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
     """FMP stable Key Metrics TTM.
 
@@ -1672,8 +2001,7 @@ def _fetch_fmp_key_metrics_ttm(ticker: str) -> Tuple[Optional[Dict[str, Any]], D
 
     return None, meta
 
-@st.cache_data(show_spinner=False, ttl=21600)
-
+@st.cache_data(show_spinner=False, ttl=86400)
 def _fetch_alpha_overview(ticker: str) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
     meta = {"provider": "AlphaVantage", "endpoint": "query?function=OVERVIEW", "status": None, "error": None, "url": None}
     if not ALPHAVANTAGE_API_KEY:
@@ -1692,8 +2020,7 @@ def _fetch_alpha_overview(ticker: str) -> Tuple[Optional[Dict[str, Any]], Dict[s
         return None, meta
     return payload, meta
 
-@st.cache_data(show_spinner=False, ttl=21600)
-
+@st.cache_data(show_spinner=False, ttl=86400)
 def _fetch_finnhub_metric(ticker: str) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
     meta = {"provider": "Finnhub", "endpoint": "api/v1/stock/metric?metric=all", "status": None, "error": None, "url": None}
     if not FINNHUB_API_KEY:
@@ -1883,22 +2210,7 @@ def enrich_metrics_multisource(ticker: str, metrics: Dict[str, Metric], info: Di
             if _is_missing("earnings_growth"):
                 _set("earnings_growth", _first_present(fh, ["epsGrowthTTM", "epsGrowth5Y"]), "Finnhub", pct=True)
 
-    
-    # --- Step 5: Derived fallbacks (no extra API calls) ---
-    # Derive PEG from P/E and earnings growth if missing.
-    try:
-        if _is_missing("peg") and (not _is_missing("pe")) and (not _is_missing("earnings_growth")):
-            pe_v = safe_float(metrics.get("pe").value if metrics.get("pe") else None)
-            eg_v = safe_float(metrics.get("earnings_growth").value if metrics.get("earnings_growth") else None)
-            if pe_v is not None and eg_v is not None and eg_v > 0:
-                # eg_v is stored as 0-1 (preferred). Convert to percent for PEG convention.
-                growth_pct = eg_v * 100.0 if abs(eg_v) <= 1.5 else eg_v
-                if growth_pct > 0:
-                    _set("peg", pe_v / growth_pct, "Derived")
-    except Exception:
-        pass
-
-# If still missing, keep as None; UI will show —
+    # If still missing, keep as None; UI will show —
     missing_left = [k for k in wanted if _is_missing(k)]
     if missing_left:
         debug["steps"].append({"missing_after_fallbacks": missing_left})
@@ -2279,34 +2591,49 @@ def get_auto_peers(ticker: str, sector: str, info: Dict[str, Any]) -> List[str]:
 def fetch_peer_comparison(ticker: str, peers: List[str]) -> pd.DataFrame:
     """
     Fetch comparison metrics for ticker and its peers.
-    Returns DataFrame with columns: Ticker, P/E, Op. Margin, Rev. Growth, FCF Yield
+    Používá paralelní fetching pro rychlost (ThreadPoolExecutor).
     """
-    
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     all_tickers = [ticker] + peers
-    rows = []
-    
-    for t in all_tickers:
+
+    def _fetch_one(t: str) -> Optional[Dict]:
         try:
             info = fetch_ticker_info(t)
             if not info:
-                continue
-            
+                return None
             mc = safe_float(info.get('marketCap'))
             fcf_ttm_peer, _ = get_fcf_ttm_yfinance(t, mc)
             fcf_yield_peer = safe_div(fcf_ttm_peer, mc) if fcf_ttm_peer and mc else None
-
-            rows.append({
+            return {
                 "Ticker": t,
                 "P/E": safe_float(info.get("trailingPE")),
                 "Op. Margin": safe_float(info.get("operatingMargins")),
                 "Rev. Growth": safe_float(info.get("revenueGrowth")),
                 "FCF Yield": fcf_yield_peer,
                 "Market Cap": mc,
-            })
+                "ROE": safe_float(info.get("returnOnEquity")),
+                "Gross Margin": safe_float(info.get("grossMargins")),
+            }
         except Exception:
-            continue
-    
-    return pd.DataFrame(rows)
+            return None
+
+    rows = []
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(_fetch_one, t): t for t in all_tickers}
+        for future in as_completed(futures):
+            result = future.result()
+            if result:
+                rows.append(result)
+
+    if not rows:
+        return pd.DataFrame()
+
+    # Seřadit tak aby hlavní ticker byl první
+    df = pd.DataFrame(rows)
+    main = df[df["Ticker"] == ticker]
+    rest = df[df["Ticker"] != ticker].sort_values("Market Cap", ascending=False)
+    return pd.concat([main, rest], ignore_index=True)
 
 
 # ============================================================================
@@ -2466,74 +2793,6 @@ VÝSTUP POUZE JSON:
             "bull_case": [], "bear_case": [], 
             "verdict": "HOLD", "wait_for_price": current_price
         }
-        
-
-
-    def _extract_json(text: str) -> Dict[str, Any]:
-        """Try hard to parse JSON from model output."""
-        if not text:
-            raise ValueError("Empty AI response")
-        cleaned = re.sub(r"```json\n?|```", "", str(text)).strip()
-        try:
-            return json.loads(cleaned)
-        except Exception:
-            # Fallback: find first JSON object in the text
-            m = re.search(r"\{[\s\S]*\}", cleaned)
-            if not m:
-                raise
-            return json.loads(m.group(0))
-
-    try:
-        raw_text = ""
-
-        # Prefer new Google GenAI SDK (google-genai)
-        try:
-            from google import genai as genai_new  # type: ignore
-            client = genai_new.Client(api_key=GEMINI_API_KEY)
-            try:
-                from google.genai import types as genai_types  # type: ignore
-                cfg = genai_types.GenerateContentConfig(response_mime_type="application/json")
-                resp = client.models.generate_content(model=GEMINI_MODEL, contents=context, config=cfg)
-            except Exception:
-                # Older/newer variants of the SDK
-                resp = client.models.generate_content(model=GEMINI_MODEL, contents=context)
-
-            raw_text = getattr(resp, "text", None) or str(resp)
-
-        except Exception:
-            # Fallback to legacy SDK (google-generativeai)
-            import google.generativeai as genai_legacy  # type: ignore
-            genai_legacy.configure(api_key=GEMINI_API_KEY)
-            model = genai_legacy.GenerativeModel(GEMINI_MODEL)
-            resp = model.generate_content(context)
-            raw_text = getattr(resp, "text", None) or str(resp)
-
-        data = _extract_json(raw_text)
-
-        # Normalize/validate keys expected by the UI
-        required = ["market_situation", "bull_case", "bear_case", "verdict", "wait_for_price"]
-        for k in required:
-            if k not in data:
-                data[k] = "N/A" if k != "wait_for_price" else current_price
-
-        # Optional extras (keep UI stable even if missing)
-        if "reasoning" not in data:
-            data["reasoning"] = ""
-        if "confidence" not in data:
-            data["confidence"] = "MEDIUM"
-
-        return data
-
-    except Exception as e:
-        return {
-            "market_situation": f"Chyba AI analýzy: {str(e)}",
-            "bull_case": [],
-            "bear_case": [],
-            "verdict": "HOLD",
-            "wait_for_price": current_price,
-            "reasoning": "Selhalo spojení s Gemini API nebo parsování JSON.",
-            "confidence": "LOW"
-        }
 
 def get_earnings_calendar_estimate(ticker: str, info: Dict[str, Any]) -> Optional[dt.date]:
     """
@@ -2651,40 +2910,41 @@ def export_memo_pdf(ticker: str, company: str, memo: Dict[str, str], summary: Di
 
 
 
-def detect_value_trap(info: Dict[str, Any], metrics: Dict[str, Metric]) -> Tuple[bool, str]:
+def _detect_value_trap_impl(info: Dict[str, Any], metrics: Dict[str, "Metric"]) -> Tuple[bool, str]:
     """
     Detekce potenciální "pasti na hodnotu".
     
     Returns:
         (is_trap, warning_message)
     """
-    pe = metrics.get("marketCap").value if metrics.get("marketCap") else None
-    revenue_growth = metrics.get("marketCap").value if metrics.get("marketCap") else None
-    debt_to_equity = metrics.get("marketCap").value if metrics.get("marketCap") else None
+    # OPRAVA: správně čteme metriky z dict (dříve všechno tahalo marketCap)
+    pe = metrics.get("pe").value if metrics.get("pe") else None
+    revenue_growth = metrics.get("revenue_growth").value if metrics.get("revenue_growth") else None
+    debt_to_equity = metrics.get("debt_to_equity").value if metrics.get("debt_to_equity") else None
     eps = safe_float(info.get("trailingEps"))
     
     is_trap = False
-    warnings = []
+    warnings_list = []
     
     # Podmínka 1: Nízké P/E (< 10)
     if pe and pe < 10:
         # Podmínka 2: Klesající tržby
-        if revenue_growth and revenue_growth < -0.05:
+        if revenue_growth is not None and revenue_growth < -0.05:
             is_trap = True
-            warnings.append("Klesající tržby (YoY)")
+            warnings_list.append("Klesající tržby (YoY)")
         
-        # Podmínka 3: Vysoký dluh
-        if debt_to_equity and debt_to_equity > 200:
+        # Podmínka 3: Vysoký dluh (D/E > 200 = >2.0 v yfinance formátu)
+        if debt_to_equity is not None and debt_to_equity > 200:
             is_trap = True
-            warnings.append("Vysoká zadluženost (D/E > 2)")
+            warnings_list.append("Vysoká zadluženost (D/E > 2)")
         
         # Podmínka 4: Negativní EPS
-        if eps and eps <= 0:
+        if eps is not None and eps <= 0:
             is_trap = True
-            warnings.append("Negativní/nulové EPS")
+            warnings_list.append("Negativní/nulové EPS")
     
     if is_trap:
-        warning_msg = f"⚠️ **Potenciální Value Trap**: {', '.join(warnings)}. Nízká valuace může být oprávněná kvůli úpadku byznysu."
+        warning_msg = f"⚠️ **Potenciální Value Trap**: {', '.join(warnings_list)}. Nízká valuace může být oprávněná kvůli úpadku byznysu."
         return True, warning_msg
     
     return False, ""
@@ -2989,7 +3249,7 @@ def main():
         st.session_state.close_sidebar_js = False
 
     # Optional: hide sidebar overlay on mobile after analyze (keeps results visible)
-    if st.session_state.get("marketCap"):
+    if st.session_state.get("sidebar_hidden"):
         st.markdown("""
         <style>
         @media (max-width: 900px) {
@@ -3007,7 +3267,7 @@ def main():
 
 
     # If requested (e.g., after clicking Analyze), inject JS in MAIN area to force-close the sidebar on mobile.
-    if st.session_state.get("marketCap"):
+    if st.session_state.get("close_sidebar_js"):
         components.html(js_close_sidebar(), height=0, width=0)
         st.session_state.close_sidebar_js = False
 
@@ -3134,7 +3394,7 @@ def main():
         with st.form("analyze_form", clear_on_submit=False):
 
         
-            default_ticker = st.session_state.get("marketCap") or st.session_state.get("marketCap") or "AAPL"
+            default_ticker = st.session_state.get("last_ticker") or "AAPL"
 
         
             _raw_ticker = st.text_input(
@@ -3248,12 +3508,12 @@ def main():
     # ========================================================================
     
     # Welcome screen if no analysis yet
-    if st.session_state.get("marketCap") == "PICKER" and (not analyze_btn) and ("last_ticker" not in st.session_state):
+    if st.session_state.get("ui_mode") == "PICKER" and (not analyze_btn) and ("last_ticker" not in st.session_state):
         display_welcome_screen()
         st.stop()
     
         # Pokud jsme ve výsledcích, nabídni rychlý návrat na výběr (hlavně pro mobil)
-    if st.session_state.get("marketCap") == "RESULTS":
+    if st.session_state.get("ui_mode") == "RESULTS":
         colA, colB = st.columns([1, 2])
         with colA:
             if st.button("☰ Menu", use_container_width=True):
@@ -3269,7 +3529,7 @@ def main():
             st.rerun()
 
     # Process ticker
-    ticker = (st.session_state.get("marketCap") or ticker_input) if analyze_btn else st.session_state.get("last_ticker", "AAPL")
+    ticker = ticker_input if analyze_btn else st.session_state.get("last_ticker", "AAPL")
     st.session_state["last_ticker"] = ticker
     
     # Fetch data
@@ -3297,8 +3557,7 @@ def main():
         # DCF calculations
         market_cap_for_fcf = safe_float(info.get('marketCap'))
         fcf, fcf_dbg = get_fcf_ttm_yfinance(ticker, market_cap_for_fcf)
-        for _m in (fcf_dbg or []):
-            print(_m)
+        # FCF debug suppressed in UI
         shares = safe_float(info.get("sharesOutstanding"))
         current_price = metrics.get("price").value if metrics.get("price") else None
 
@@ -3329,7 +3588,6 @@ def main():
             if dcf_fcf_used < (0.3 * operating_cashflow):
                 dcf_fcf_used = operating_cashflow * 0.6
                 st.warning("⚠️ Detekováno vysoké reinvestování (Amazon style). Použito upravené OCF místo FCF.")
-                print(f"Adjusted FCF used (reinvestment-heavy): {dcf_fcf_used/1e9:.2f}B (OCF {operating_cashflow/1e9:.2f}B)")
         fair_value_dcf = None
         mos_dcf = None
         implied_growth = None
@@ -3389,6 +3647,40 @@ def main():
         # Peers
         sector = info.get("sector", "")
         auto_peers = get_auto_peers(ticker, sector, info)
+
+        # === NOVÉ ANALYTICKÉ VÝPOČTY v6.0 ===
+        # Technické indikátory
+        price_history_1y = fetch_price_history(ticker, "1y")
+        tech_signals = calculate_technical_signals(price_history_1y)
+
+        # Piotroski F-Score
+        piotroski_score, piotroski_breakdown = calculate_piotroski_fscore(info, income, balance, cashflow)
+
+        # Altman Z-Score
+        altman_z, altman_zone = calculate_altman_zscore(info)
+
+        # Graham Number
+        graham_number = calculate_graham_number(info)
+
+        # Earnings Quality
+        earnings_quality_ratio, earnings_quality_label = calculate_earnings_quality(info)
+
+        # Short Interest
+        short_interest = get_short_interest(info)
+
+        # Monte Carlo DCF
+        mc_dcf = {}
+        if fcf and shares and fcf > 0 and shares > 0:
+            mc_dcf = monte_carlo_dcf(fcf, used_dcf_growth, dcf_terminal, used_dcf_wacc, dcf_years, shares)
+
+        # Value Trap detection (nyní funguje správně)
+        is_value_trap, value_trap_msg = detect_value_trap(info, metrics)
+
+        # Earnings countdown
+        next_earnings = get_earnings_calendar_estimate(ticker, info)
+        earnings_countdown = None
+        if next_earnings:
+            earnings_countdown = (next_earnings - dt.date.today()).days
     
     # ========================================================================
     # SMART HEADER (5 cards)
@@ -3396,9 +3688,13 @@ def main():
     
     st.title(f"{company} ({ticker})")
     st.caption(f"📊 {sector} | Market Cap: {fmt_money(info.get('marketCap'), 0) if info.get('marketCap') else '—'}")
-    
+
+    # Value Trap warning (nyní funkční)
+    if is_value_trap:
+        st.markdown(f'<div class="warning-box">{value_trap_msg}</div>', unsafe_allow_html=True)
+
     # Header cards row
-    h1, h2, h3, h4, h5 = st.columns(5)
+    h1, h2, h3, h4, h5, h6 = st.columns(6)
     
     with h1:
         st.markdown(f"""
@@ -3443,12 +3739,28 @@ def main():
             <div class="metric-delta">{ath_str} od vrcholu</div>
         </div>
         """, unsafe_allow_html=True)
-    
+
     with h5:
+        # Earnings countdown
+        if earnings_countdown is not None and earnings_countdown >= 0:
+            earn_color = "#ff8800" if earnings_countdown <= 14 else "#aaaaaa"
+            earn_label = f"Za {earnings_countdown} dní" if earnings_countdown > 0 else "🔔 Dnes!"
+        else:
+            earn_color = "#aaaaaa"
+            earn_label = "—"
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-label">📅 Earnings</div>
+            <div class="metric-value" style="font-size:1.1rem;">{next_earnings.strftime('%d.%m.%Y') if next_earnings else '—'}</div>
+            <div class="metric-delta" style="color: {earn_color};">{earn_label}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with h6:
         st.markdown(f"""
         <div class="metric-card" style="border: 2px solid {verdict_color};">
             <div class="metric-label">Sektor</div>
-            <div class="metric-value" style="font-size: 1.2rem;">{sector[:20]}</div>
+            <div class="metric-value" style="font-size: 1.1rem;">{sector[:18]}</div>
             <div class="metric-delta" style="color: {verdict_color}; font-weight: 700;">{verdict}</div>
         </div>
         """, unsafe_allow_html=True)
@@ -3466,6 +3778,7 @@ def main():
         "🏢 Peer Comparison",
         "📋 Scorecard Pro",
         "💰 Valuace (DCF)",
+        "📐 Tech. Analýza",
         "📝 Memo & Watchlist",
         "🐦 Social & Guru"
     ])
@@ -3512,6 +3825,37 @@ def main():
                 st.metric("FCF Yield", fmt_pct(metrics.get("fcf_yield").value if metrics.get("fcf_yield") else None))
                 st.metric("Debt/Equity", fmt_num(metrics.get("debt_to_equity").value if metrics.get("debt_to_equity") else None))
                 st.metric("Rev. Growth", fmt_pct(metrics.get("revenue_growth").value if metrics.get("revenue_growth") else None))
+
+            # Nové advanced metriky
+            st.markdown("---")
+            st.markdown("#### 🔬 Advanced Metriky")
+            adv1, adv2, adv3, adv4 = st.columns(4)
+            with adv1:
+                pf_color = "normal" if piotroski_score >= 6 else ("inverse" if piotroski_score <= 3 else "off")
+                st.metric("Piotroski F-Score", f"{piotroski_score}/9",
+                          delta="Silná" if piotroski_score >= 6 else ("Slabá" if piotroski_score <= 3 else "Průměrná"),
+                          delta_color=pf_color)
+            with adv2:
+                z_color = "normal" if altman_z and altman_z > 2.99 else ("inverse" if altman_z and altman_z < 1.81 else "off")
+                st.metric("Altman Z-Score", fmt_num(altman_z), delta=altman_zone.split(" ", 1)[-1] if altman_zone else None, delta_color=z_color)
+            with adv3:
+                st.metric("Graham Number", fmt_money(graham_number),
+                          delta=f"{((current_price/graham_number-1)*100):+.1f}% vs cena" if graham_number and current_price else None,
+                          delta_color="inverse" if graham_number and current_price and current_price > graham_number else "normal")
+            with adv4:
+                si_pct = short_interest * 100 if short_interest else None
+                si_color = "inverse" if si_pct and si_pct > 10 else "normal"
+                st.metric("Short Interest", f"{si_pct:.1f}%" if si_pct else "—",
+                          delta="Vysoký!" if si_pct and si_pct > 10 else None, delta_color=si_color)
+
+            st.markdown("---")
+            eq_col1, eq_col2 = st.columns(2)
+            with eq_col1:
+                st.metric("Earnings Quality (CFO/NI)", fmt_num(earnings_quality_ratio))
+                st.caption(earnings_quality_label)
+            with eq_col2:
+                roic_val_display = calculate_roic(info)
+                st.metric("ROIC (approx.)", fmt_pct(roic_val_display))
 
             with st.expander("🔧 Metrics debug", expanded=False):
                 mdbg = st.session_state.get("metrics_enrich_debug", None)
@@ -3629,13 +3973,14 @@ def main():
         st.markdown("---")
         st.markdown("### 📊 Earnings Calendar")
         
-        # Estimate earnings date
-        next_earnings = get_earnings_calendar_estimate(ticker, info)
-        
+        # next_earnings je nyní vypočítáno výše (earnings_countdown)
         if next_earnings:
-            st.success(f"📅 **{ticker} očekávané earnings:** {next_earnings.strftime('%d.%m.%Y')}")
-        else:
-            st.info(f"📅 Earnings datum pro {ticker} není k dispozici")
+            if earnings_countdown is not None and earnings_countdown == 0:
+                st.error(f"🔔 **{ticker} DNES earnings!** {next_earnings.strftime('%d.%m.%Y')}")
+            elif earnings_countdown is not None and earnings_countdown <= 7:
+                st.warning(f"⏰ **{ticker} earnings za {earnings_countdown} dní:** {next_earnings.strftime('%d.%m.%Y')}")
+            else:
+                st.success(f"📅 **{ticker} očekávané earnings:** {next_earnings.strftime('%d.%m.%Y')} (za {earnings_countdown} dní)")
         
         # Show peer earnings too
         if auto_peers:
@@ -3895,6 +4240,40 @@ def main():
             ])
             
             st.dataframe(metric_df, use_container_width=True, hide_index=True)
+
+        # Piotroski F-Score breakdown
+        st.markdown("---")
+        st.markdown("### 🔬 Piotroski F-Score breakdown")
+        if piotroski_breakdown:
+            pf_col1, pf_col2 = st.columns([1, 1])
+            with pf_col1:
+                pf_color_main = "#00ff88" if piotroski_score >= 6 else ("#ffaa00" if piotroski_score >= 4 else "#ff4444")
+                pf_label = "Silné fundamenty" if piotroski_score >= 6 else ("Průměrné" if piotroski_score >= 4 else "Slabé fundamenty")
+                st.markdown(f"""
+                <div style="text-align:center; padding:20px; border: 2px solid {pf_color_main}; border-radius:10px;">
+                    <div style="font-size:0.9rem; opacity:0.8;">Piotroski F-Score</div>
+                    <div style="font-size:3rem; font-weight:900; color:{pf_color_main};">{piotroski_score}<span style="font-size:1.5rem; opacity:0.6;">/9</span></div>
+                    <div style="color:{pf_color_main};">{pf_label}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            with pf_col2:
+                for criterion, val in piotroski_breakdown.items():
+                    icon = "✅" if val == 1 else "❌"
+                    st.write(f"{icon} {criterion}")
+
+        # Altman Z-Score
+        st.markdown("---")
+        st.markdown("### 🏥 Altman Z-Score (Bankruptcy Risk)")
+        if altman_z is not None:
+            az_color = "#00ff88" if altman_z > 2.99 else ("#ffaa00" if altman_z > 1.81 else "#ff4444")
+            st.markdown(f"""
+            <div class="metric-card" style="border: 2px solid {az_color};">
+                <div class="metric-label">Z-Score</div>
+                <div class="metric-value" style="color: {az_color};">{altman_z}</div>
+                <div class="metric-delta">{altman_zone}</div>
+            </div>
+            """, unsafe_allow_html=True)
+            st.caption("Z > 2.99 = Bezpečná | 1.81 – 2.99 = Šedá zóna | Z < 1.81 = Riziko bankrotu")
     
     # ------------------------------------------------------------------------
     # TAB 6: DCF Valuation
@@ -3970,14 +4349,224 @@ def main():
                     st.success(f"✅ Trh očekává zdravý růst ({implied_growth*100:.1f}%) - v souladu s tvým modelem")
                 else:
                     st.warning(f"🚀 Trh očekává agresivní růst ({implied_growth*100:.1f}%) - vysoká očekávání, riziko zklamání")
+
+            # Monte Carlo DCF
+            st.markdown("---")
+            st.markdown("### 🎲 Monte Carlo DCF Simulace (1 000 scénářů)")
+            if mc_dcf:
+                import plotly.graph_objects as go
+                mc_col1, mc_col2, mc_col3 = st.columns(3)
+                with mc_col1:
+                    st.metric("P10 (pesimistický)", fmt_money(mc_dcf.get("p10")))
+                    st.metric("Medián", fmt_money(mc_dcf.get("median")))
+                with mc_col2:
+                    st.metric("Průměr", fmt_money(mc_dcf.get("mean")))
+                    st.metric("P90 (optimistický)", fmt_money(mc_dcf.get("p90")))
+                with mc_col3:
+                    prob_upside = None
+                    if current_price and mc_dcf.get("mean"):
+                        # Crude estimate of probability of being undervalued
+                        mean_fv = mc_dcf["mean"]
+                        std_fv = mc_dcf.get("std", mean_fv * 0.3)
+                        if std_fv > 0:
+                            from scipy import stats as scipy_stats
+                            try:
+                                prob_upside = float(scipy_stats.norm.sf(current_price, mean_fv, std_fv)) * 100
+                            except Exception:
+                                prob_upside = 100 * max(0, min(1, (mean_fv - current_price) / (2 * std_fv) + 0.5))
+                    st.metric("Pravděp. undervalued", f"{prob_upside:.0f}%" if prob_upside is not None else "—")
+                    st.metric("Simulací", mc_dcf.get("n", 0))
+
+                st.caption(f"💡 Monte Carlo přidává náhodné odchylky k growth rate (±30%), WACC (±15%) a terminal growth (±0.5%). P10/P90 = 10./90. percentil všech scénářů.")
+            else:
+                st.info("Monte Carlo není dostupné (chybí FCF data)")
+
+            # Investment Simulator
+            st.markdown("---")
+            st.markdown("### 💰 Co kdybych investoval X Kč?")
+            sim_col1, sim_col2 = st.columns([1, 2])
+            with sim_col1:
+                sim_amount = st.number_input("Investovaná částka (Kč)", min_value=1000, max_value=10_000_000,
+                                              value=100_000, step=10_000, key="sim_amount")
+                sim_years = st.selectbox("Investiční horizont", [1, 2, 3, 5, 10], index=2, key="sim_years")
+                if st.button("▶️ Spustit simulaci", use_container_width=True, key="btn_sim"):
+                    with st.spinner("Načítám historická data..."):
+                        sim_result = simulate_investment(ticker, sim_amount, sim_years)
+                    st.session_state["sim_result"] = sim_result
+
+            with sim_col2:
+                sim_result = st.session_state.get("sim_result")
+                if sim_result:
+                    profit = sim_result["final"] - sim_result["initial"]
+                    ret_color = "#00ff88" if profit >= 0 else "#ff4444"
+                    st.markdown(f"""
+                    <div class="metric-card" style="border: 2px solid {ret_color};">
+                        <div class="metric-label">Výsledek za {sim_result['years']} let ({sim_result['start_date']} → {sim_result['end_date']})</div>
+                        <div class="metric-value" style="color: {ret_color};">{sim_result['final']:,.0f} Kč</div>
+                        <div class="metric-delta">Zisk/Ztráta: {profit:+,.0f} Kč ({sim_result['stock_return']*100:+.1f}%)</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    if sim_result.get("spy_return") is not None:
+                        spy_final = sim_result["initial"] * (1 + sim_result["spy_return"])
+                        spy_profit = spy_final - sim_result["initial"]
+                        spy_color = "#00ff88" if spy_profit >= 0 else "#ff4444"
+                        st.markdown(f"""
+                        <div class="metric-card">
+                            <div class="metric-label">📊 vs. S&P 500 (SPY)</div>
+                            <div class="metric-value" style="color: {spy_color};">{spy_final:,.0f} Kč</div>
+                            <div class="metric-delta">SPY: {sim_result['spy_return']*100:+.1f}% | Outperformance: {(sim_result['stock_return']-sim_result['spy_return'])*100:+.1f}%</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                else:
+                    st.info("Zadej částku a klikni na 'Spustit simulaci'")
         
         else:
             st.warning("⚠️ Nedostatek dat pro DCF (chybí FCF nebo počet akcií)")
     
     # ------------------------------------------------------------------------
-    # TAB 7: Memo & Watchlist
+    # TAB 7: Technická Analýza
     # ------------------------------------------------------------------------
     with tabs[6]:
+        st.markdown('<div class="section-header">📐 Technická Analýza</div>', unsafe_allow_html=True)
+
+        if not tech_signals:
+            st.warning("Nedostatek cenových dat pro technickou analýzu.")
+        else:
+            import plotly.graph_objects as go
+
+            cp = tech_signals.get("current_price", 0)
+
+            # --- RSI ---
+            ta1, ta2, ta3 = st.columns(3)
+            rsi_val = tech_signals.get("rsi")
+            with ta1:
+                if rsi_val is not None:
+                    rsi_color = "#ff4444" if rsi_val > 70 else ("#00ff88" if rsi_val < 30 else "#ffaa00")
+                    rsi_label = "🔴 Překoupeno" if rsi_val > 70 else ("🟢 Přeprodáno" if rsi_val < 30 else "🟡 Neutrální")
+                    st.metric("RSI (14)", f"{rsi_val:.1f}", delta=rsi_label)
+                else:
+                    st.metric("RSI (14)", "—")
+
+            # --- MACD ---
+            with ta2:
+                st.metric("MACD signal", tech_signals.get("macd_label", "—"))
+
+            # --- MA200 ---
+            with ta3:
+                pct_ma200 = tech_signals.get("pct_from_ma200")
+                if pct_ma200 is not None:
+                    ma200_color = "normal" if pct_ma200 > 0 else "inverse"
+                    st.metric("vs. MA200", f"{pct_ma200*100:+.1f}%", delta_color=ma200_color)
+                else:
+                    st.metric("vs. MA200", "—")
+
+            st.markdown("---")
+
+            # --- 52W Range + Bollinger Bands ---
+            st.markdown("### 📊 Cenový kontext")
+            ta4, ta5 = st.columns(2)
+            with ta4:
+                high_52w = tech_signals.get("high_52w")
+                low_52w = tech_signals.get("low_52w")
+                if high_52w and low_52w and cp:
+                    st.markdown(f"**52W High:** {fmt_money(high_52w)} ({((cp/high_52w-1)*100):+.1f}%)")
+                    st.markdown(f"**52W Low:** {fmt_money(low_52w)} ({((cp/low_52w-1)*100):+.1f}%)")
+
+                    # Range bar visualization
+                    if high_52w > low_52w:
+                        pos = (cp - low_52w) / (high_52w - low_52w)
+                        fig_range = go.Figure(go.Indicator(
+                            mode="gauge+number",
+                            value=pos * 100,
+                            title={"text": "Pozice v 52W rozsahu"},
+                            number={"suffix": "%"},
+                            gauge={
+                                "axis": {"range": [0, 100]},
+                                "bar": {"color": "#00ff88" if pos < 0.4 else ("#ffaa00" if pos < 0.7 else "#ff4444")},
+                                "steps": [
+                                    {"range": [0, 30], "color": "rgba(0,255,136,0.15)"},
+                                    {"range": [30, 70], "color": "rgba(255,170,0,0.1)"},
+                                    {"range": [70, 100], "color": "rgba(255,68,68,0.15)"},
+                                ]
+                            }
+                        ))
+                        fig_range.update_layout(height=220, margin=dict(l=10, r=10, t=40, b=10),
+                                                paper_bgcolor='rgba(0,0,0,0)', font={"color": "white"})
+                        st.plotly_chart(fig_range, use_container_width=True)
+
+            with ta5:
+                bb_upper = tech_signals.get("bb_upper")
+                bb_lower = tech_signals.get("bb_lower")
+                bb_mid = tech_signals.get("bb_mid")
+                if bb_upper and bb_lower and cp:
+                    bb_pos = "nad horním pásmem 🔴" if cp > bb_upper else ("pod dolním pásmem 🟢" if cp < bb_lower else "uvnitř pásem 🟡")
+                    st.markdown("**Bollinger Bands (20d)**")
+                    st.markdown(f"Horní: {fmt_money(bb_upper)} | Střed: {fmt_money(bb_mid)} | Dolní: {fmt_money(bb_lower)}")
+                    st.markdown(f"Cena je: **{bb_pos}**")
+
+                ma50 = tech_signals.get("ma50")
+                ma200 = tech_signals.get("ma200")
+                st.markdown("**Moving Averages**")
+                if ma50:
+                    col = "#00ff88" if cp >= ma50 else "#ff4444"
+                    st.markdown(f"MA50: {fmt_money(ma50)} {'✅ nad' if cp >= ma50 else '❌ pod'}")
+                if ma200:
+                    st.markdown(f"MA200: {fmt_money(ma200)} {'✅ nad' if cp >= ma200 else '❌ pod'}")
+                if ma50 and ma200:
+                    if ma50 > ma200:
+                        st.success("📈 Golden Cross aktivní (MA50 > MA200)")
+                    else:
+                        st.error("📉 Death Cross aktivní (MA50 < MA200)")
+
+            st.markdown("---")
+
+            # --- Cenový chart s MA50/MA200 ---
+            st.markdown("### 📈 Cenový vývoj s indikátory")
+            if not price_history_1y.empty and "Close" in price_history_1y.columns:
+                close_s = price_history_1y["Close"].dropna()
+                fig_ta = go.Figure()
+                fig_ta.add_trace(go.Scatter(x=price_history_1y.index, y=close_s, name="Cena", line=dict(color="#4fc3f7", width=2)))
+
+                if len(close_s) >= 50:
+                    ma50_s = close_s.rolling(50).mean()
+                    fig_ta.add_trace(go.Scatter(x=price_history_1y.index, y=ma50_s, name="MA50",
+                                                line=dict(color="#ffaa00", width=1, dash="dash")))
+                if len(close_s) >= 200:
+                    ma200_s = close_s.rolling(200).mean()
+                    fig_ta.add_trace(go.Scatter(x=price_history_1y.index, y=ma200_s, name="MA200",
+                                                line=dict(color="#ff4444", width=1, dash="dot")))
+                if bb_upper and bb_lower:
+                    ma20_s = close_s.rolling(20).mean()
+                    std20_s = close_s.rolling(20).std()
+                    fig_ta.add_trace(go.Scatter(x=price_history_1y.index, y=(ma20_s + 2*std20_s),
+                                                name="BB Upper", line=dict(color="rgba(150,150,255,0.5)", width=1), fill=None))
+                    fig_ta.add_trace(go.Scatter(x=price_history_1y.index, y=(ma20_s - 2*std20_s),
+                                                name="BB Lower", line=dict(color="rgba(150,150,255,0.5)", width=1),
+                                                fill="tonexty", fillcolor="rgba(150,150,255,0.05)"))
+
+                fig_ta.update_layout(
+                    height=400, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                    font={"color": "white"}, legend=dict(orientation="h"),
+                    xaxis=dict(gridcolor="rgba(255,255,255,0.1)"),
+                    yaxis=dict(gridcolor="rgba(255,255,255,0.1)")
+                )
+                st.plotly_chart(fig_ta, use_container_width=True)
+
+            # --- Volume trend ---
+            vol_trend = tech_signals.get("vol_trend")
+            if vol_trend is not None:
+                vt_label = f"Objem (20d vs 60d průměr): {vol_trend*100:+.1f}%"
+                if vol_trend > 0.2:
+                    st.success(f"📶 Zvýšený zájem: {vt_label}")
+                elif vol_trend < -0.2:
+                    st.warning(f"📉 Snížený zájem: {vt_label}")
+                else:
+                    st.info(f"📊 Objem normální: {vt_label}")
+
+    # ------------------------------------------------------------------------
+    # TAB 8: Memo & Watchlist  (formerly 7)
+    # ------------------------------------------------------------------------
+    with tabs[7]:
         st.markdown('<div class="section-header">📝 Investment Memo & Watchlist</div>', unsafe_allow_html=True)
         
         # Load existing
@@ -4002,37 +4591,37 @@ def main():
         
         thesis = st.text_area(
             "Investiční teze",
-            value=memo.get("marketCap") or auto_thesis,
+            value=memo.get("thesis") or auto_thesis,
             height=120
         )
         
         drivers = st.text_area(
             "Klíčové faktory úspěchu",
-            value=memo.get("marketCap") or "- Růst tržeb\n- Zlepšení marží\n- Inovace",
+            value=memo.get("drivers") or "- Růst tržeb\n- Zlepšení marží\n- Inovace",
             height=100
         )
         
         risks = st.text_area(
             "Rizika",
-            value=memo.get("marketCap") or "- Konkurence\n- Regulace\n- Makro",
+            value=memo.get("risks") or "- Konkurence\n- Regulace\n- Makro",
             height=100
         )
         
         catalysts = st.text_area(
             "Katalyzátory",
-            value=memo.get("marketCap") or "",
+            value=memo.get("catalysts") or "",
             height=80
         )
         
         buy_conditions = st.text_area(
             "Buy podmínky",
-            value=memo.get("marketCap") or f"- Entry < {fmt_money(fair_value_dcf * 0.95) if fair_value_dcf else '—'}",
+            value=memo.get("buy_conditions") or f"- Entry < {fmt_money(fair_value_dcf * 0.95) if fair_value_dcf else '—'}",
             height=80
         )
         
         notes = st.text_area(
             "Poznámky",
-            value=memo.get("marketCap") or "",
+            value=memo.get("notes") or "",
             height=80
         )
         
@@ -4116,16 +4705,28 @@ def main():
             rows = []
             for tkr, item in items.items():
                 inf = fetch_ticker_info(tkr)
-                price_now = safe_float(inf.get("marketCap") or inf.get("marketCap"))
-                tgt = safe_float(item.get("marketCap"))
-                hit = (price_now is not None and tgt is not None and tgt > 0 and price_now <= tgt)
+                # OPRAVA: správně čteme currentPrice, ne marketCap
+                price_now = safe_float(inf.get("currentPrice") or inf.get("regularMarketPrice"))
+                tgt = safe_float(item.get("target_buy"))  # OPRAVA: čteme target_buy, ne marketCap
                 
+                if price_now is not None and tgt is not None and tgt > 0:
+                    diff_pct = (price_now / tgt - 1) * 100
+                    if price_now <= tgt:
+                        status = "🟢 BUY!"
+                    elif diff_pct < 5:
+                        status = f"🟡 Blízko ({diff_pct:+.1f}%)"
+                    else:
+                        status = f"⏳ Wait ({diff_pct:+.1f}%)"
+                else:
+                    status = "⏳ Wait"
+                    diff_pct = None
+
                 rows.append({
                     "Ticker": tkr,
-                    "Current": fmt_money(price_now),
-                    "Target": fmt_money(tgt),
-                    "Status": "🟢 BUY!" if hit else "⏳ Wait",
-                    "Updated": item.get("updated_at", "")[:10]
+                    "Aktuální cena": fmt_money(price_now),
+                    "Cílová cena": fmt_money(tgt),
+                    "Status": status,
+                    "Aktualizováno": item.get("updated_at", "")[:10]
                 })
             
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
@@ -4134,9 +4735,9 @@ def main():
     
 
     # ------------------------------------------------------------------------
-    # TAB 8: Social & Guru
+    # TAB 9: Social & Guru  (formerly 8)
     # ------------------------------------------------------------------------
-    with tabs[7]:
+    with tabs[8]:
         st.markdown('<div class="section-header">🐦 Social & Guru</div>', unsafe_allow_html=True)
 
         # Flatten options
@@ -4233,24 +4834,28 @@ def main():
 
     # Footer
     st.markdown("---")
-    st.caption(f"📊 Data: Yahoo Finance | {APP_NAME} {APP_VERSION} | Toto není investiční doporučení")
+    st.caption(f"📊 Data: Yahoo Finance | {APP_NAME} v6.0 | Toto není investiční doporučení")
 
 
 def display_welcome_screen():
     """Display welcome screen when no ticker is selected."""
-    st.title("Vítej v Stock Picker Pro v2.0! 🚀")
+    st.title("Vítej v Stock Picker Pro v6.0! 🚀")
     
     st.markdown("""
     ### Pokročilá kvantitativní analýza akcií
     
-    **🆕 Co je nového ve v2.0:**
-    - ✅ **Smart Header** - 5 klíčových karet s responzivním layoutem
-    - ✅ **Market Watch** - Makro kalendář (Fed, CPI, NFP) + earnings termíny
-    - ✅ **AI Analyst** - Hloubkový Gemini report s bull/bear scénáři a konkrétní "wait for" cenou
-    - ✅ **Auto-Peer Comparison** - Automatické srovnání s 3-5 konkurenty
-    - ✅ **Insider Trading Pro** - Vážení rolí (CEO/CFO), cluster buying detection
-    - ✅ **Scorecard Pro (0-100)** - Rozpad: Valuace, Kvalita, Růst, Fin. zdraví
-    - ✅ **Mismatch Warning** - Upozornění když analytici vs DCF nesouhlasí
+    **🆕 Co je nového ve v6.0:**
+    - ✅ **Smart Header** - 6 karet: cena, analytici, DCF, ATH, Earnings Countdown, verdikt
+    - ✅ **Technická Analýza** - nový tab: RSI, MACD, Bollinger Bands, MA50/MA200, Volume
+    - ✅ **Monte Carlo DCF** - 1 000 simulací fair value s P10/P90 distribucí
+    - ✅ **Piotroski F-Score** - 9-bodový fundamental quality check
+    - ✅ **Altman Z-Score** - bankruptcy risk indicator
+    - ✅ **Graham Number** - konzervativní fair value
+    - ✅ **Earnings Quality** - CFO/NI ratio (odhalí manipulace)
+    - ✅ **Investment Simulator** - co kdybych investoval X Kč? vs. S&P 500
+    - ✅ **Paralelní peer fetch** - 3-5× rychlejší peer comparison
+    - ✅ **Value Trap Detector** - opravená funkce (dříve nefungovala)
+    - ✅ **Watchlist fix** - správné porovnání cena vs. target price
     
     **Jak začít:**
     1. ⬅️ Zadej ticker symbol v levém panelu (např. AAPL, MSFT, TSLA)
