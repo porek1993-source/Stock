@@ -600,31 +600,56 @@ def get_all_time_high(ticker: str) -> Optional[float]:
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_insider_transactions_fmp(ticker: str) -> Optional[pd.DataFrame]:
-    """Načítá insider obchody ze spolehlivého FMP API."""
+    """
+    Načítá insider obchody z FMP API (Robustní verze pro v3/v4).
+    """
     if not FMP_API_KEY:
         return None
     
+    # Zkusíme v4 endpoint, který je detailnější
     url = f"https://financialmodelingprep.com/api/v4/insider-trading?symbol={ticker}&limit=100&apikey={FMP_API_KEY}"
     
     try:
         response = requests.get(url)
-        if response.status_code == 200:
+        data = response.json()
+        
+        # Pokud v4 vrátí prázdno nebo chybu, zkusíme v3 (záložní plán)
+        if not data or not isinstance(data, list):
+            url_v3 = f"https://financialmodelingprep.com/api/v3/insider-trading/{ticker}?limit=100&apikey={FMP_API_KEY}"
+            response = requests.get(url_v3)
             data = response.json()
-            if not data:
-                return pd.DataFrame()
             
-            # Mapování dat z FMP na formát, který tvůj skript už zná
-            df = pd.DataFrame(data)
-            df = df.rename(columns={
-                'transactionDate': 'Date',
-                'transactionType': 'Transaction',
-                'officerTitle': 'Position'
-            })
+        if not data or not isinstance(data, list):
+            return pd.DataFrame()
             
-            # Výpočet hodnoty transakce: počet akcií * cena
-            df['Value'] = df['securitiesTransacted'] * df['price']
-            return df
-        return None
+        df = pd.DataFrame(data)
+        
+        # --- FLEXIBILNÍ PŘEJMENOVÁNÍ ---
+        # FMP API vrací různé názvy sloupců v různých verzích
+        rename_map = {
+            'transactionDate': 'Date', 'transaction_date': 'Date',
+            'transactionType': 'Transaction', 'type': 'Transaction', 'acquistionOrDisposition': 'Transaction',
+            'officerTitle': 'Position', 'reportingName': 'Position',
+            'securitiesTransacted': 'Shares', 'securities_transacted': 'Shares',
+            'price': 'Price', 'priceAtTransaction': 'Price'
+        }
+        
+        df = df.rename(columns=rename_map)
+        
+        # Ověříme, zda máme klíčové sloupce, jinak je vytvoříme
+        required_cols = ['Date', 'Transaction', 'Position', 'Shares', 'Price']
+        for col in required_cols:
+            if col not in df.columns:
+                df[col] = 0 if col in ['Shares', 'Price'] else "N/A"
+
+        # Výpočet hodnoty (Value)
+        df['Value'] = pd.to_numeric(df['Shares'], errors='coerce') * pd.to_numeric(df['Price'], errors='coerce')
+        
+        # Filtrujeme jen relevantní sloupce
+        final_df = df[['Date', 'Transaction', 'Position', 'Value', 'Shares', 'Price']].dropna(subset=['Date'])
+        
+        return final_df
+
     except Exception as e:
         print(f"FMP API Error: {e}")
         return None
