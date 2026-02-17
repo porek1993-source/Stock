@@ -601,28 +601,84 @@ def get_all_time_high(ticker: str) -> Optional[float]:
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_insider_transactions_fmp(ticker: str) -> Optional[pd.DataFrame]:
     """
-    Načítá insider obchody z FMP API (Robustní verze pro v3/v4).
+    FALLBACK: Načítá insider obchody scrapováním Finvizu (protože API jsou placená).
     """
-    if not FMP_API_KEY:
-        return None
-    
-    # Zkusíme v4 endpoint, který je detailnější
-    url = f"https://financialmodelingprep.com/api/v4/insider-trading?symbol={ticker}&limit=100&apikey={FMP_API_KEY}"
+    url = f"https://finviz.com/quote.ashx?t={ticker}"
+    # Finviz vyžaduje User-Agent, aby si myslel, že jsme prohlížeč
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
     
     try:
-        response = requests.get(url)
-        data = response.json()
+        response = requests.get(url, headers=headers)
+        if response.status_code != 200:
+            return None
         
-        # Pokud v4 vrátí prázdno nebo chybu, zkusíme v3 (záložní plán)
-        if not data or not isinstance(data, list):
-            url_v3 = f"https://financialmodelingprep.com/api/v3/insider-trading/{ticker}?limit=100&apikey={FMP_API_KEY}"
-            response = requests.get(url_v3)
-            data = response.json()
+        # Pandas umí vycucnout všechny tabulky z HTML
+        # Tabulka insiderů je obvykle ta poslední na stránce Finvizu
+        dfs = pd.read_html(response.text)
+        
+        # Hledáme tabulku, která obsahuje slova 'Transaction' a 'SEC Form 4'
+        insider_df = None
+        for df in dfs:
+            if 'Transaction' in df.columns and 'SEC Form 4' in df.columns:
+                insider_df = df
+                break
+                
+        # Pokud jsme tabulku nenašli, zkusíme vzít poslední (často to tak je)
+        if insider_df is None and len(dfs) > 5:
+            insider_df = dfs[-1]
             
-        if not data or not isinstance(data, list):
+        if insider_df is None or insider_df.empty:
             return pd.DataFrame()
-            
-        df = pd.DataFrame(data)
+
+        # --- ČIŠTĚNÍ DAT Z FINVIZU ---
+        # Finviz má sloupce: [Owner, Relationship, Date, Transaction, Cost, #Shares, Value ($), #Shares Total, SEC Form 4]
+        
+        # Přejmenování pro kompatibilitu s tvým skriptem
+        rename_map = {
+            'Date': 'Date',
+            'Transaction': 'Transaction',
+            'Relationship': 'Position',
+            'Value ($)': 'Value',
+            '#Shares': 'Shares',
+            'Cost': 'Price'
+        }
+        
+        # Flexibilní přejmenování (ignoruje, co tam není)
+        insider_df = insider_df.rename(columns=rename_map)
+        
+        # Filtrujeme jen sloupce, které potřebujeme
+        needed_cols = ['Date', 'Transaction', 'Position', 'Value']
+        
+        # Pokud chybí Value, zkusíme ji dopočítat
+        if 'Value' not in insider_df.columns and 'Shares' in insider_df.columns and 'Price' in insider_df.columns:
+             # Čištění numerických dat (odstranění čárek)
+             def clean_num(x):
+                 if isinstance(x, str): return pd.to_numeric(x.replace(',', ''), errors='coerce')
+                 return x
+             
+             insider_df['Value'] = clean_num(insider_df['Shares']) * clean_num(insider_df['Price'])
+
+        # Finální formátování
+        # Finviz datum je např. "Feb 13", musíme přidat rok (odhadem aktuální rok)
+        def parse_finviz_date(d_str):
+            try:
+                # Přidáme aktuální rok, protože Finviz rok neuvádí
+                current_year = dt.datetime.now().year
+                return pd.to_datetime(f"{d_str} {current_year}", format="%b %d %Y")
+            except:
+                return pd.NaT
+
+        insider_df['Date'] = insider_df['Date'].apply(parse_finviz_date)
+        
+        # Čištění sloupce Value (odstranění čárek)
+        if 'Value' in insider_df.columns:
+             insider_df['Value'] = insider_df['Value'].astype(str).str.replace(',', '').apply(pd.to_numeric, errors='coerce')
+
+        return insider_df
+
+    except Exception as e:
+        print(f"Finviz Scraper Error: {e}")
+        return pd.DataFrame() # Vrať prázdnou tabulku místo None, aby aplikace nepadala
         
         # --- FLEXIBILNÍ PŘEJMENOVÁNÍ ---
         # FMP API vrací různé názvy sloupců v různých verzích
