@@ -1941,11 +1941,11 @@ def extract_metrics(info: Dict[str, Any], ticker: str) -> Dict[str, Metric]:
                        or safe_float(info.get("earningsQuarterlyGrowth")))
     earnings_quarterly_growth = safe_float(info.get("earningsQuarterlyGrowth"))
 
-# Derived PEG fallback: P/E ÷ (earnings_growth × 100) – když provider PEG nedá
-# Pozor: earnings_growth je v yfinance typicky ve formátu 0.10 (=10%), proto ×100.
-if peg is None and pe is not None and pe > 0 and earnings_growth is not None and earnings_growth > 0.005:
-    _dpeg = pe / (earnings_growth * 100.0)
-    peg = round(_dpeg, 2) if 0.01 < _dpeg < 10 else None
+    # Derived PEG fallback: P/E ÷ (earnings_growth × 100) – když provider PEG nedá
+    # Pozor: earnings_growth je v yfinance typicky ve formátu 0.10 (=10%), proto ×100.
+    if peg is None and pe is not None and pe > 0 and earnings_growth is not None and earnings_growth > 0.005:
+        _dpeg = pe / (earnings_growth * 100.0)
+        peg = round(_dpeg, 2) if 0.01 < _dpeg < 10 else None
 
     
     # Financial health
