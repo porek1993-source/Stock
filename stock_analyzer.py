@@ -2206,7 +2206,7 @@ def main():
     ticker = (st.session_state.get("marketCap") or ticker_input) if analyze_btn else st.session_state.get("last_ticker", "AAPL")
     st.session_state["last_ticker"] = ticker
     
-    # Fetch data
+# Fetch data
     with st.spinner(f"📊 Načítám data pro {ticker}..."):
         info = fetch_ticker_info(ticker)
         
@@ -2215,7 +2215,7 @@ def main():
             st.stop()
         
         company = info.get("longName") or info.get("shortName") or ticker
-       metrics = extract_metrics(info, ticker)
+        metrics = extract_metrics(info, ticker)  # <--- ZDE BYLA CHYBA (nyní zarovnáno)
 
         # --- NOVÉ: HYBRID FIX (Doplnění dat z FMP) ---
         # Pokud máš nastavený FMP_API_KEY, pokusí se najít chybějící P/E, Debt atd.
@@ -2227,7 +2227,7 @@ def main():
         # -----------------------------------------------
 
         price_history = fetch_price_history(ticker, period="1y")
-       
+        
         income, balance, cashflow = fetch_financials(ticker)
         
         # Advanced data
