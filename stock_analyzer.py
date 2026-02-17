@@ -12,7 +12,7 @@ import os
 import warnings
 warnings.filterwarnings('ignore', category=DeprecationWarning)
 warnings.filterwarnings('ignore', category=FutureWarning, module=r'google\.generativeai\..*')
-
+import requests
 import re
 import json
 import math
@@ -599,14 +599,35 @@ def get_all_time_high(ticker: str) -> Optional[float]:
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def fetch_insider_transactions(ticker: str) -> Optional[pd.DataFrame]:
-    """Fetch insider transactions."""
-    try:
-        t = yf.Ticker(ticker)
-        return getattr(t, "insider_transactions", None)
-    except Exception:
+def fetch_insider_transactions_fmp(ticker: str) -> Optional[pd.DataFrame]:
+    """Načítá insider obchody ze spolehlivého FMP API."""
+    if not FMP_API_KEY:
         return None
-
+    
+    url = f"https://financialmodelingprep.com/api/v4/insider-trading?symbol={ticker}&limit=100&apikey={FMP_API_KEY}"
+    
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            if not data:
+                return pd.DataFrame()
+            
+            # Mapování dat z FMP na formát, který tvůj skript už zná
+            df = pd.DataFrame(data)
+            df = df.rename(columns={
+                'transactionDate': 'Date',
+                'transactionType': 'Transaction',
+                'officerTitle': 'Position'
+            })
+            
+            # Výpočet hodnoty transakce: počet akcií * cena
+            df['Value'] = df['securitiesTransacted'] * df['price']
+            return df
+        return None
+    except Exception as e:
+        print(f"FMP API Error: {e}")
+        return None
 
 # ============================================================================
 # METRICS & SCORING
@@ -2025,7 +2046,7 @@ def main():
         
         # Advanced data
         ath = get_all_time_high(ticker)
-        insider_df = fetch_insider_transactions(ticker)
+        insider_df = fetch_insider_transactions_fmp(ticker)
         insider_signal = compute_insider_pro_signal(insider_df)
         
         # DCF calculations
