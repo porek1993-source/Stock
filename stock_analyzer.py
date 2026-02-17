@@ -999,7 +999,7 @@ def _payload_to_records(payload: Any) -> Optional[List[Dict[str, Any]]]:
     return None
 
 
-@st.cache_data(show_spinner=False, ttl=21600)
+@st.cache_data(show_spinner=False, ttl=43200)
 def _fetch_insider_from_alpha_vantage(ticker: str) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Free-ish alternative: Alpha Vantage Insider Transactions.
@@ -1039,7 +1039,7 @@ def _fetch_insider_from_alpha_vantage(ticker: str) -> Tuple[pd.DataFrame, Dict[s
     return df, meta
 
 
-@st.cache_data(show_spinner=False, ttl=21600)
+@st.cache_data(show_spinner=False, ttl=43200)
 def _fetch_insider_from_finnhub(ticker: str) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Alternative: Finnhub insider transactions.
@@ -1078,7 +1078,7 @@ def _fetch_insider_from_finnhub(ticker: str) -> Tuple[pd.DataFrame, Dict[str, An
 
 
 
-@st.cache_data(show_spinner=False, ttl=21600)
+@st.cache_data(show_spinner=False, ttl=43200)
 def _fetch_insider_from_api_ninjas(ticker: str) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Alternative: API Ninjas insider transactions.
@@ -1157,7 +1157,7 @@ def _sec_pick_xml_from_index(index_payload: Any) -> Optional[str]:
     return sorted(xmls, key=score)[0]
 
 
-@st.cache_data(show_spinner=False, ttl=21600)
+@st.cache_data(show_spinner=False, ttl=43200)
 def _fetch_insider_from_sec(ticker: str, max_filings: int = 12, max_transactions: int = 250) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Free fallback: SEC EDGAR Form 4 parsing via:
@@ -1565,52 +1565,75 @@ def _first_present(d: Dict[str, Any], keys: List[str]) -> Optional[float]:
                 return v
     return None
 
-@st.cache_data(show_spinner=False, ttl=43200)
+@st.cache_data(show_spinner=False, ttl=86400)
 def _fetch_fmp_ratios_ttm(ticker: str) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
-    meta = {"provider": "FMP", "endpoint": "api/v3/ratios-ttm", "status": None, "error": None, "url": None}
+    """FMP stable Ratios TTM.
+
+    Docs (stable): /stable/ratios-ttm?symbol=...
+    """
+    meta = {"provider": "FMP", "endpoint": "stable/ratios-ttm", "status": None, "error": None, "url": None}
     if not FMP_API_KEY:
         meta["error"] = "FMP_API_KEY není nastaven."
         return None, meta
-    url = f"https://financialmodelingprep.com/api/v3/ratios-ttm/{ticker}?apikey={FMP_API_KEY}"
+
+    url = f"https://financialmodelingprep.com/stable/ratios-ttm?symbol={ticker}&apikey={FMP_API_KEY}"
     meta["url"] = _redact_apikey(url)
+
     status, payload, err = _http_get_json(url)
     meta["status"] = status
     meta["error"] = _extract_api_error(payload, err)
-    if status != 200:
+
+    if status != 200 or payload is None:
         return None, meta
-    if isinstance(payload, list) and payload:
-        if isinstance(payload[0], dict):
-            return payload[0], meta
+
+    # Stable endpoints usually return a list (often length=1). Be flexible.
+    if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+        return payload[0], meta
+
     if isinstance(payload, dict):
-        # sometimes wrapped
         recs = payload.get("data") or payload.get("ratios") or payload.get("results")
         if isinstance(recs, list) and recs and isinstance(recs[0], dict):
             return recs[0], meta
+        # Some variants may directly return a dict of ratios
+        if payload and any(isinstance(v, (int, float, str)) for v in payload.values()):
+            return payload, meta
+
     return None, meta
 
-@st.cache_data(show_spinner=False, ttl=43200)
+@st.cache_data(show_spinner=False, ttl=86400)
 def _fetch_fmp_key_metrics_ttm(ticker: str) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
-    meta = {"provider": "FMP", "endpoint": "api/v3/key-metrics-ttm", "status": None, "error": None, "url": None}
+    """FMP stable Key Metrics TTM.
+
+    Docs (stable): /stable/key-metrics-ttm?symbol=...
+    """
+    meta = {"provider": "FMP", "endpoint": "stable/key-metrics-ttm", "status": None, "error": None, "url": None}
     if not FMP_API_KEY:
         meta["error"] = "FMP_API_KEY není nastaven."
         return None, meta
-    url = f"https://financialmodelingprep.com/api/v3/key-metrics-ttm/{ticker}?apikey={FMP_API_KEY}"
+
+    url = f"https://financialmodelingprep.com/stable/key-metrics-ttm?symbol={ticker}&apikey={FMP_API_KEY}"
     meta["url"] = _redact_apikey(url)
+
     status, payload, err = _http_get_json(url)
     meta["status"] = status
     meta["error"] = _extract_api_error(payload, err)
-    if status != 200:
+
+    if status != 200 or payload is None:
         return None, meta
-    if isinstance(payload, list) and payload:
-        if isinstance(payload[0], dict):
-            return payload[0], meta
+
+    if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+        return payload[0], meta
+
     if isinstance(payload, dict):
         recs = payload.get("data") or payload.get("metrics") or payload.get("results")
         if isinstance(recs, list) and recs and isinstance(recs[0], dict):
             return recs[0], meta
+        if payload and any(isinstance(v, (int, float, str)) for v in payload.values()):
+            return payload, meta
+
     return None, meta
 
-@st.cache_data(show_spinner=False, ttl=43200)
+@st.cache_data(show_spinner=False, ttl=86400)
 def _fetch_alpha_overview(ticker: str) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
     meta = {"provider": "AlphaVantage", "endpoint": "query?function=OVERVIEW", "status": None, "error": None, "url": None}
     if not ALPHAVANTAGE_API_KEY:
@@ -1629,7 +1652,7 @@ def _fetch_alpha_overview(ticker: str) -> Tuple[Optional[Dict[str, Any]], Dict[s
         return None, meta
     return payload, meta
 
-@st.cache_data(show_spinner=False, ttl=43200)
+@st.cache_data(show_spinner=False, ttl=86400)
 def _fetch_finnhub_metric(ticker: str) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
     meta = {"provider": "Finnhub", "endpoint": "api/v1/stock/metric?metric=all", "status": None, "error": None, "url": None}
     if not FINNHUB_API_KEY:
@@ -1684,7 +1707,7 @@ def enrich_metrics_multisource(ticker: str, metrics: Dict[str, Metric], info: Di
             return True
         return False
 
-    wanted = ["pe", "peg", "debt_to_equity", "operating_margin", "profit_margin", "gross_margin", "roe"]
+    wanted = ["pe", "peg", "pb", "ps", "ev_ebitda", "debt_to_equity", "operating_margin", "profit_margin", "gross_margin", "roe", "current_ratio", "quick_ratio", "fcf_yield", "revenue_growth", "earnings_growth"]
     if not any(_is_missing(k) for k in wanted):
         debug["steps"].append("yfinance ok (no enrichment needed)")
         return metrics, debug
@@ -1719,6 +1742,18 @@ def enrich_metrics_multisource(ticker: str, metrics: Dict[str, Metric], info: Di
                 _set("gross_margin", _first_present(merged_fmp, ["grossProfitMarginTTM", "grossMarginTTM", "grossMarginsTTM"]), "FMP", pct=True)
             if _is_missing("roe"):
                 _set("roe", _first_present(merged_fmp, ["returnOnEquityTTM", "roeTTM", "returnOnEquity"]), "FMP", pct=True)
+            if _is_missing("pb"):
+                _set("pb", _first_present(merged_fmp, ["priceToBookRatioTTM", "pbRatioTTM", "pbTTM"]), "FMP")
+            if _is_missing("ps"):
+                _set("ps", _first_present(merged_fmp, ["priceToSalesRatioTTM", "psRatioTTM", "psTTM"]), "FMP")
+            if _is_missing("ev_ebitda"):
+                _set("ev_ebitda", _first_present(merged_fmp, ["enterpriseValueOverEBITDATTM", "evToEbitdaTTM", "evEbitdaTTM"]), "FMP")
+            if _is_missing("current_ratio"):
+                _set("current_ratio", _first_present(merged_fmp, ["currentRatioTTM", "currentRatio"]), "FMP")
+            if _is_missing("quick_ratio"):
+                _set("quick_ratio", _first_present(merged_fmp, ["quickRatioTTM", "quickRatio"]), "FMP")
+            if _is_missing("fcf_yield"):
+                _set("fcf_yield", _first_present(merged_fmp, ["freeCashFlowYieldTTM", "fcfYieldTTM", "freeCashFlowYield"]), "FMP", pct=True)
 
     # --- Step 3: Alpha Vantage OVERVIEW ---
     if any(_is_missing(k) for k in wanted) and ALPHAVANTAGE_API_KEY:
@@ -1726,9 +1761,9 @@ def enrich_metrics_multisource(ticker: str, metrics: Dict[str, Metric], info: Di
         debug["steps"].append({"AlphaVantage_overview": av_meta})
         if isinstance(av, dict) and av:
             if _is_missing("pe"):
-                _set("pe", safe_float(av.get("PERatio")), "AlphaVantage")
+                _set("pe", _first_present(av, ["PERatio", "TrailingPE", "TrailingPERatio", "peTTM"]), "AlphaVantage")
             if _is_missing("peg"):
-                _set("peg", safe_float(av.get("PEGRatio")), "AlphaVantage")
+                _set("peg", _first_present(av, ["PEGRatio", "PegRatio", "pegTTM"]), "AlphaVantage")
             if _is_missing("operating_margin"):
                 _set("operating_margin", safe_float(av.get("OperatingMarginTTM")), "AlphaVantage", pct=True)
             if _is_missing("profit_margin"):
@@ -1740,6 +1775,26 @@ def enrich_metrics_multisource(ticker: str, metrics: Dict[str, Metric], info: Di
                 rev = safe_float(av.get("RevenueTTM"))
                 if gp is not None and rev not in (None, 0):
                     _set("gross_margin", gp / rev, "AlphaVantage", pct=True)
+
+            if _is_missing("pb"):
+                _set("pb", _first_present(av, ["PriceToBookRatio", "PriceToBook"]), "AlphaVantage")
+            if _is_missing("ps"):
+                _set("ps", _first_present(av, ["PriceToSalesRatioTTM", "PriceToSalesRatio"]), "AlphaVantage")
+            if _is_missing("ev_ebitda"):
+                _set("ev_ebitda", _first_present(av, ["EVToEBITDA", "EVToEBITDAttm"]), "AlphaVantage")
+            if _is_missing("current_ratio"):
+                _set("current_ratio", _first_present(av, ["CurrentRatio"]), "AlphaVantage")
+            if _is_missing("quick_ratio"):
+                _set("quick_ratio", _first_present(av, ["QuickRatio"]), "AlphaVantage")
+            if _is_missing("revenue_growth"):
+                _set("revenue_growth", _first_present(av, ["QuarterlyRevenueGrowthYOY"]), "AlphaVantage", pct=True)
+            if _is_missing("earnings_growth"):
+                _set("earnings_growth", _first_present(av, ["QuarterlyEarningsGrowthYOY"]), "AlphaVantage", pct=True)
+            if _is_missing("fcf_yield"):
+                fcf = _first_present(av, ["FreeCashFlowTTM", "FCF", "freeCashFlowTTM"])
+                mc = safe_float(av.get("MarketCapitalization"))
+                if fcf is not None and mc not in (None, 0):
+                    _set("fcf_yield", fcf / mc, "AlphaVantage", pct=True)
 
             if _is_missing("debt_to_equity"):
                 # AlphaVantage sometimes provides DebtToEquity or TotalDebt/TotalEquity
@@ -1770,6 +1825,22 @@ def enrich_metrics_multisource(ticker: str, metrics: Dict[str, Metric], info: Di
                 _set("gross_margin", _first_present(fh, ["grossMarginTTM", "grossMarginAnnual"]), "Finnhub", pct=True)
             if _is_missing("debt_to_equity"):
                 _set("debt_to_equity", _first_present(fh, ["totalDebtToEquityTTM", "totalDebt/totalEquityTTM", "totalDebt/totalEquityAnnual", "totalDebtToEquityAnnual"]), "Finnhub")
+            if _is_missing("pb"):
+                _set("pb", _first_present(fh, ["pbAnnual", "pbTTM", "priceToBookAnnual", "priceToBookTTM"]), "Finnhub")
+            if _is_missing("ps"):
+                _set("ps", _first_present(fh, ["psAnnual", "psTTM", "priceToSalesAnnual", "priceToSalesTTM"]), "Finnhub")
+            if _is_missing("ev_ebitda"):
+                _set("ev_ebitda", _first_present(fh, ["evToEbitdaTTM", "evToEbitdaAnnual"]), "Finnhub")
+            if _is_missing("current_ratio"):
+                _set("current_ratio", _first_present(fh, ["currentRatioAnnual", "currentRatioTTM"]), "Finnhub")
+            if _is_missing("quick_ratio"):
+                _set("quick_ratio", _first_present(fh, ["quickRatioAnnual", "quickRatioTTM"]), "Finnhub")
+            if _is_missing("fcf_yield"):
+                _set("fcf_yield", _first_present(fh, ["freeCashFlowYieldTTM", "freeCashFlowYieldAnnual", "fcfYieldTTM"]), "Finnhub", pct=True)
+            if _is_missing("revenue_growth"):
+                _set("revenue_growth", _first_present(fh, ["revenueGrowthTTM", "revenueGrowth5Y"]), "Finnhub", pct=True)
+            if _is_missing("earnings_growth"):
+                _set("earnings_growth", _first_present(fh, ["epsGrowthTTM", "epsGrowth5Y"]), "Finnhub", pct=True)
 
     # If still missing, keep as None; UI will show —
     missing_left = [k for k in wanted if _is_missing(k)]
@@ -1924,15 +1995,21 @@ def reverse_dcf_implied_growth(
 # ============================================================================
 
 def compute_insider_pro_signal(insider_df: Optional[pd.DataFrame]) -> Dict[str, Any]:
-    """Advanced insider trading signal with role weighting and cluster detection.
+    """Advanced insider trading signal with role weighting + cluster detection (buy & sell).
 
-    Key improvements:
-    - Robust classification using `Code` when available (P/S).
-    - Filters out non-informative transactions (option exercises, grants, tax withholding, gifts).
-    - Cluster buying boost cannot push signal below -100 (and won't amplify bearish signals).
-    - Returns both `cluster_detected` and `cluster_buying` for UI compatibility.
+    What we count (by default):
+    - Primarily open-market transactions with Code in {P, S}.
+    - If Code is missing, we fall back to the normalized `Transaction` label (Buy/Sell).
+
+    Clusters:
+    - Cluster buying: >=3 unique insiders BUY within a 30-day window.
+    - Cluster selling: >=3 unique insiders SELL within a 30-day window.
+
+    Signal:
+    - Value-weighted net flow (BUY - SELL) normalized to [-100, +100].
+    - Cluster buying adds a small positive adjustment.
+    - Cluster selling adds a negative adjustment (worsens rating), even when base signal is bullish.
     """
-
     if insider_df is None or insider_df.empty:
         return {
             "signal": 0.0,
@@ -1941,8 +2018,8 @@ def compute_insider_pro_signal(insider_df: Optional[pd.DataFrame]) -> Dict[str, 
             "insights": ["Žádné insider transakce k dispozici"],
             "recent_buys": 0,
             "recent_sells": 0,
-            "cluster_detected": False,
             "cluster_buying": False,
+            "cluster_selling": False,
         }
 
     role_weights = {
@@ -1963,8 +2040,11 @@ def compute_insider_pro_signal(insider_df: Optional[pd.DataFrame]) -> Dict[str, 
     sell_signal = 0.0
     buy_count = 0
     sell_count = 0
+
     buy_dates: List[dt.datetime] = []
     buy_owners: List[str] = []
+    sell_dates: List[dt.datetime] = []
+    sell_owners: List[str] = []
 
     def _norm(s: Any) -> str:
         try:
@@ -1972,11 +2052,26 @@ def compute_insider_pro_signal(insider_df: Optional[pd.DataFrame]) -> Dict[str, 
         except Exception:
             return ""
 
-    def _is_informative_code(code: str) -> bool:
-        # informative open-market trades are usually P (purchase) and S (sale)
-        # exclude common noise codes: A (grant/award), M (option exercise), F (tax withholding),
-        # G (gift), D (disposition other), etc.
+    def _is_open_market(code: str) -> bool:
         return code in {"P", "S"}
+
+    def _cluster(dates: List[dt.datetime], owners: List[str], window_days: int = 30, min_unique: int = 3) -> bool:
+        try:
+            paired = sorted([(d, o) for d, o in zip(dates, owners) if d and o], key=lambda x: x[0])
+            if len(paired) < min_unique:
+                return False
+            for i in range(len(paired)):
+                start_d = paired[i][0]
+                uniq = set()
+                for j in range(i, len(paired)):
+                    if (paired[j][0] - start_d).days > window_days:
+                        break
+                    uniq.add(paired[j][1])
+                if len(uniq) >= min_unique:
+                    return True
+            return False
+        except Exception:
+            return False
 
     for _, row in insider_df.iterrows():
         try:
@@ -1987,92 +2082,83 @@ def compute_insider_pro_signal(insider_df: Optional[pd.DataFrame]) -> Dict[str, 
             trans_dt = pd.to_datetime(date_raw, errors="coerce")
             if pd.isna(trans_dt) or trans_dt.to_pydatetime() < cutoff_date:
                 continue
+            trans_dt_py = trans_dt.to_pydatetime()
 
             code = str(row.get("Code") or "").strip().upper()
             tx_txt = _norm(row.get("Transaction"))
 
-            # Exclude obvious non-signal trades based on free-text notes
+            # Exclude obvious "noise" rows by text (some providers mark automatic sales, tax withholding, etc.)
             if any(k in tx_txt for k in ["tax", "withhold", "10b5", "10b5-1", "rule 10b5", "automatic"]):
                 continue
 
-            # Prefer numeric value; else compute from shares*price if possible
+            # Prefer explicit value; else compute from shares*price
             value = safe_float(row.get("Value"))
             if value is None:
                 sh = safe_float(row.get("Shares"))
                 pr = safe_float(row.get("Price"))
-                if sh is not None and pr is not None:
-                    value = sh * pr
-                else:
-                    value = 0.0
+                value = (sh * pr) if (sh is not None and pr is not None) else 0.0
 
+            # Role weighting
             position = _norm(row.get("Position"))
             weight = 1.0
             for role, w in role_weights.items():
                 if role in position:
                     weight = max(weight, w)
 
-            # Determine buy/sell
+            # Determine direction
             is_buy = False
             is_sell = False
 
             if code:
-                if _is_informative_code(code):
-                    is_buy = (code == "P")
-                    is_sell = (code == "S")
-                else:
-                    # non-informative code -> ignore for signal counts
+                if not _is_open_market(code):
+                    # ignore non-open-market codes to avoid option exercises/grants/etc skew
                     continue
+                is_buy = (code == "P")
+                is_sell = (code == "S")
             else:
-                # fallback heuristic
-                if any(k in tx_txt for k in ["buy", "purchase", "acquire"]):
+                # fallback to normalized label
+                if tx_txt == "buy":
                     is_buy = True
-                elif any(k in tx_txt for k in ["sell", "sale", "dispose"]):
+                elif tx_txt == "sell":
                     is_sell = True
+                else:
+                    # last chance heuristic
+                    if "buy" in tx_txt or "purchase" in tx_txt or "acquire" in tx_txt:
+                        is_buy = True
+                    elif "sell" in tx_txt or "sale" in tx_txt or "dispose" in tx_txt:
+                        is_sell = True
+
+            owner = str(row.get("Owner") or "").strip().upper()
 
             if is_buy:
                 buy_signal += float(value) * weight
                 buy_count += 1
-                buy_dates.append(trans_dt.to_pydatetime())
-                buy_owners.append(str(row.get("Owner") or "").strip().upper())
+                if owner:
+                    buy_dates.append(trans_dt_py)
+                    buy_owners.append(owner)
             elif is_sell:
                 sell_signal += float(value) * weight
                 sell_count += 1
+                if owner:
+                    sell_dates.append(trans_dt_py)
+                    sell_owners.append(owner)
 
         except Exception:
             continue
 
-    # Cluster buying: >=3 unique insiders buying within 30 days
-    cluster_detected = False
-    try:
-        if buy_dates and len(set([o for o in buy_owners if o])) >= 3:
-            paired = sorted([(d, o) for d, o in zip(buy_dates, buy_owners)], key=lambda x: x[0])
-            # sliding window over dates, count unique owners in window <= 30 days
-            for i in range(len(paired)):
-                start_d = paired[i][0]
-                owners_in_window = set()
-                for j in range(i, len(paired)):
-                    if (paired[j][0] - start_d).days > 30:
-                        break
-                    if paired[j][1]:
-                        owners_in_window.add(paired[j][1])
-                if len(owners_in_window) >= 3:
-                    cluster_detected = True
-                    break
-    except Exception:
-        cluster_detected = False
+    cluster_buying = _cluster(buy_dates, buy_owners)
+    cluster_selling = _cluster(sell_dates, sell_owners)
 
     net = buy_signal - sell_signal
     denom = max(buy_signal + sell_signal, 1.0)
     signal = (net / denom) * 100.0
 
-    # Cluster buying boost should not amplify bearish signals
-    if cluster_detected:
-        if signal > 0:
-            signal *= 1.3
-        else:
-            signal *= 0.85
+    # Cluster adjustments (additive so it can also soften opposite-direction signals)
+    if cluster_buying:
+        signal += 12.0
+    if cluster_selling:
+        signal -= 12.0
 
-    # Clamp to [-100, +100]
     signal = max(-100.0, min(100.0, float(signal)))
 
     if signal >= 50:
@@ -2086,15 +2172,17 @@ def compute_insider_pro_signal(insider_df: Optional[pd.DataFrame]) -> Dict[str, 
     else:
         label = "Strong Sell"
 
-    confidence = min(1.0, (buy_count + sell_count) / 10.0)
+    confidence = min(1.0, (buy_count + sell_count) / 12.0)
 
     insights: List[str] = []
     if buy_count > 0:
         insights.append(f"✅ {buy_count} insider nákupů v posledních 6 měsících")
     if sell_count > 0:
         insights.append(f"⚠️ {sell_count} insider prodejů v posledních 6 měsících")
-    if cluster_detected:
-        insights.append("🔥 Cluster buying detekován - více insiderů nakupuje současně!")
+    if cluster_buying:
+        insights.append("🔥 Cluster buying: více insiderů nakupuje ve stejném období.")
+    if cluster_selling:
+        insights.append("🧊 Cluster selling: více insiderů prodává ve stejném období.")
     if signal > 30:
         insights.append(f"💪 Silný bullish signál od insiderů ({signal:.0f}/100)")
     elif signal < -30:
@@ -2107,11 +2195,9 @@ def compute_insider_pro_signal(insider_df: Optional[pd.DataFrame]) -> Dict[str, 
         "insights": insights if insights else ["Žádné významné insider aktivity"],
         "recent_buys": buy_count,
         "recent_sells": sell_count,
-        "cluster_detected": cluster_detected,
-        "cluster_buying": cluster_detected,
+        "cluster_buying": bool(cluster_buying),
+        "cluster_selling": bool(cluster_selling),
     }
-
-
 # ============================================================================
 # PEER COMPARISON
 # ============================================================================
@@ -3412,7 +3498,13 @@ def main():
         
         if insider_signal.get("cluster_buying"):
             st.markdown(
-                '<div class="success-box">🔥 <b>Cluster Buying Detected!</b> Více insiderů nakupuje současně - silný bullish signál.</div>',
+                '<div class="success-box">🔥 <b>Cluster Buying Detected</b> Více insiderů nakupuje ve stejném období.</div>',
+                unsafe_allow_html=True
+            )
+
+        if insider_signal.get("cluster_selling"):
+            st.markdown(
+                '<div class="warning-box">🧊 <b>Cluster Selling Detected</b> Více insiderů prodává ve stejném období (negativní signál).</div>',
                 unsafe_allow_html=True
             )
         
