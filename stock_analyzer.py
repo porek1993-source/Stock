@@ -1132,6 +1132,7 @@ def generate_ai_analyst_report(ticker: str, company: str, info: Dict, metrics: D
     fcf_yield_val = metrics.get("fcf_yield").value if metrics.get("fcf_yield") else 0
 # Určení jazyka pro AI
 target_lang = "ČEŠTINĚ" if st.session_state.get("language") == "cz" else "ANGLIČTINĚ"
+        
     context = f"""
 Jsi Seniorní Portfolio Manažer se specializací na ASYMETRICKÝ RISK/REWARD. Tvým cílem je identifikovat situace, kde je downside omezený a upside exponenciální.
 DŮLEŽITÉ: Celou analýzu a všechny texty v JSON výstupu napiš v {target_lang}.
