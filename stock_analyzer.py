@@ -2307,6 +2307,20 @@ def main():
     with tabs[2]:
         st.markdown('<div class="section-header">🤖 AI Analytik & Asymetrie</div>', unsafe_allow_html=True)
         
+        # --- EDUKATIVNÍ LEGENDA ---
+        with st.expander("ℹ️ Co znamenají tyto metriky?", expanded=False):
+            st.markdown("""
+            ### ⚖️ Asymmetry Score
+            Měří tzv. **konvexitu** investice. Cílem je najít situace, kde je distribuce pravděpodobnosti "nakloněna" ve váš prospěch.
+            * **Vysoké skóre (70+):** Downside je omezen (např. vysokou hotovostí, aktivy), zatímco upside je otevřený.
+            * **Nízké skóre (0-30):** Riskujete 50 %, abyste vydělali 10 %. To je asymetrie, které se chceme vyhnout.
+
+            ### 🥊 Red Team Attack
+            Technika eliminace **konfirmačního zkreslení** (tendence hledat jen důkazy pro svůj názor). 
+            AI v tomto modulu simuluje roli *Short Sellera* nebo agresivního oponenta. Pokud vaše investiční teze přežije 
+            tento "útok" a rizika jsou akceptovatelná, je vaše rozhodnutí mnohem robustnější.
+            """)
+            
         if not GEMINI_API_KEY:
             st.warning("⚠️ **AI analýza není dostupná**")
             st.info("Nastav GEMINI_API_KEY v secrets pro aktivaci AI analytika.")
