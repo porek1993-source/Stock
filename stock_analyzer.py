@@ -1444,7 +1444,7 @@ def get_advanced_verdict(
     warnings = []
     
     # Base verdict from scorecard
-    if scorecard >= 75:
+    if scorecard >= 85:
         base = "STRONG BUY"
         color = "#00ff88"
     elif scorecard >= 60:
@@ -1609,12 +1609,12 @@ def estimate_smart_params(info: Dict[str, Any], metrics: Dict[str, "Metric"]) ->
     # 4. STROP RŮSTU (Growth Cap) - Tady se krotí ty "brutální" čísla
     if is_mega_cap:
         # Giganti nemohou růst o 20% věčně -> Cap 12%
-        growth_cap = 0.12
+        growth_cap = 0.08
     elif is_large_cap:
-        growth_cap = 0.18
+        growth_cap = 0.12
     else:
         # Malé dravé firmy mohou růst rychleji
-        growth_cap = 0.25
+        growth_cap = 0.20
         
     growth = max(0.03, min(growth_cap, raw_growth))
 
