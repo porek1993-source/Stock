@@ -382,56 +382,88 @@ def clamp(v: Optional[float], lo: float, hi: float) -> Optional[float]:
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_ticker_info(ticker: str) -> Dict[str, Any]:
     """
-    Získá info o firmě. Primárně z Yahoo, při neúspěchu zkusí FMP API (Backup).
+    Získá data o firmě. Primárně z FMP (pokud je klíč), jinak zkouší Yahoo.
+    Skládá data z Profile, Ratios a Key Metrics, aby nahradil yfinance.
     """
-    # 1. Pokus: Yahoo Finance (yfinance)
-    try:
-        t = yf.Ticker(ticker)
-        info = t.info
-        # Yahoo občas vrátí prázdný dict nebo dict bez klíčových dat, i když nespadne
-        if info and 'regularMarketPrice' in info and info['regularMarketPrice'] is not None:
-            return info
-    except Exception:
-        pass # Ignorujeme chybu a jdeme na backup
-
-    # 2. Pokus: Financial Modeling Prep (FMP) - Backup
+    info = {}
+    
+    # 1. CESTA: FINANCIAL MODELING PREP (Priorita - Spolehlivé)
     if FMP_API_KEY:
         try:
-            # Endpoint v3/profile je zdarma a velmi spolehlivý
-            url = f"https://financialmodelingprep.com/api/v3/profile/{ticker}?apikey={FMP_API_KEY}"
-            response = requests.get(url)
-            data = response.json()
+            # A) PROFILE (Cena, Sektor, Popis, Beta)
+            url_profile = f"https://financialmodelingprep.com/api/v3/profile/{ticker}?apikey={FMP_API_KEY}"
+            prof_data = requests.get(url_profile).json()
             
-            if data and isinstance(data, list) and len(data) > 0:
-                fmp_data = data[0]
+            if prof_data and isinstance(prof_data, list):
+                p = prof_data[0]
+                info.update({
+                    'longName': p.get('companyName'),
+                    'symbol': p.get('symbol'),
+                    'sector': p.get('sector'),
+                    'industry': p.get('industry'),
+                    'longBusinessSummary': p.get('description'),
+                    'currentPrice': p.get('price'),
+                    'regularMarketPrice': p.get('price'),
+                    'marketCap': p.get('mktCap'),
+                    'beta': p.get('beta'),
+                    'currency': p.get('currency'),
+                    'country': p.get('country'),
+                    'website': p.get('website')
+                })
+
+                # B) RATIOS TTM (P/E, ROE, Margins) - Klíčové pro metriky
+                url_ratios = f"https://financialmodelingprep.com/api/v3/ratios-ttm/{ticker}?apikey={FMP_API_KEY}"
+                ratios_data = requests.get(url_ratios).json()
+                if ratios_data and isinstance(ratios_data, list):
+                    r = ratios_data[0]
+                    info.update({
+                        'trailingPE': r.get('peRatioTTM'),
+                        'returnOnEquity': r.get('returnOnEquityTTM'),
+                        'returnOnAssets': r.get('returnOnAssetsTTM'),
+                        'operatingMargins': r.get('operatingProfitMarginTTM'),
+                        'profitMargins': r.get('netProfitMarginTTM'),
+                        'grossMargins': r.get('grossProfitMarginTTM'),
+                        'priceToBook': r.get('priceToBookRatioTTM'),
+                        'priceToSalesTrailing12Months': r.get('priceToSalesRatioTTM'),
+                        'dividendYield': r.get('dividendYielTTM'), # FMP má překlep v názvu (Yiel)
+                        'payoutRatio': r.get('payoutRatioTTM'),
+                        'currentRatio': r.get('currentRatioTTM'),
+                        'quickRatio': r.get('quickRatioTTM')
+                    })
+
+                # C) KEY METRICS TTM (Debt, Cash, EV/EBITDA, FCF)
+                url_metrics = f"https://financialmodelingprep.com/api/v3/key-metrics-ttm/{ticker}?apikey={FMP_API_KEY}"
+                metrics_data = requests.get(url_metrics).json()
+                if metrics_data and isinstance(metrics_data, list):
+                    m = metrics_data[0]
+                    info.update({
+                        'enterpriseToEbitda': m.get('enterpriseValueOverEBITDATTM'),
+                        'debtToEquity': m.get('debtToEquityTTM'),
+                        'totalCash': m.get('cashAndCashEquivalentsTTM'),
+                        'totalDebt': m.get('totalDebtTTM'),
+                        'freeCashflow': m.get('freeCashFlowTTM'), # Přímé FCF!
+                        'operatingCashflow': m.get('operatingCashFlowTTM'),
+                        'revenueGrowth': m.get('revenueGrowthTTM') # Občas chybí, ale zkusíme
+                    })
                 
-                # Převedeme FMP formát na formát, který očekává tvůj zbytek kódu (Yahoo style)
-                # Tím zajistíme, že zbytek aplikace (grafy, metriky) bude fungovat
-                return {
-                    'longName': fmp_data.get('companyName'),
-                    'symbol': fmp_data.get('symbol'),
-                    'sector': fmp_data.get('sector'),
-                    'industry': fmp_data.get('industry'),
-                    'longBusinessSummary': fmp_data.get('description'),
-                    'currentPrice': fmp_data.get('price'),
-                    'regularMarketPrice': fmp_data.get('price'),
-                    'marketCap': fmp_data.get('mktCap'),
-                    'beta': fmp_data.get('beta'),
-                    'currency': fmp_data.get('currency'),
-                    'website': fmp_data.get('website'),
-                    # FMP nemá přímo P/E v profilu, ale má cenu. Ostatní metriky (P/E) se dají dopočítat nebo nechat N/A
-                    'trailingPE': None, # FMP má P/E v jiném endpointu (ratios), pro profil stačí základ
-                    'dividendYield': None,
-                    'returnOnEquity': None, 
-                    'freeCashflow': None, # To si skript bere z cashflow statementu
-                    'country': fmp_data.get('country')
-                }
+                # Pokud se povedlo načíst aspoň cenu, vracíme FMP data
+                if info.get('currentPrice'):
+                    return info
+
         except Exception as e:
-            print(f"FMP Profile Error: {e}")
+            print(f"FMP Info Error: {e}")
 
-    # Pokud vše selže
-    return {}
+    # 2. CESTA: YAHOO FINANCE (Fallback - Nespolehlivé na Cloudu)
+    try:
+        t = yf.Ticker(ticker)
+        y_info = t.info
+        # Validace: Yahoo musí vrátit aspoň cenu A market cap, jinak je to k ničemu
+        if y_info and y_info.get('regularMarketPrice') and y_info.get('marketCap'):
+            return y_info
+    except Exception:
+        pass
 
+    return info
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_price_history(ticker: str, period: str = "1y") -> pd.DataFrame:
