@@ -187,6 +187,11 @@ def _get_secret(name: str, default: str = "") -> str:
 # FMP_API_KEY="..."
 GEMINI_API_KEY = _get_secret("GEMINI_API_KEY", "")
 FMP_API_KEY = _get_secret("FMP_API_KEY", "")
+SEC_USER_AGENT = _get_secret("SEC_USER_AGENT", "StockPickerPro/1.0 (contact: your_email@example.com)")
+ALPHAVANTAGE_API_KEY = _get_secret("ALPHAVANTAGE_API_KEY", "")
+FINNHUB_API_KEY = _get_secret("FINNHUB_API_KEY", "")
+NINJAS_API_KEY = _get_secret("NINJAS_API_KEY", "") or _get_secret("Ninjas_API_KEY", "")
+
 # PDF Export
 try:
     from reportlab.lib.pagesizes import letter
@@ -276,69 +281,11 @@ MACRO_CALENDAR = [
     {"date": "2026-03-25", "event": "US GDP (Q4 2025 Final)", "importance": "Medium"},
 ]
 
-@dataclass
-class Metric:
-    name: str
-    value: Optional[float]
-    min_val: Optional[float] = None
-    max_val: Optional[float] = None
-    target_below: Optional[float] = None
-    target_above: Optional[float] = None
-    weight: float = 1.0
-    source: str = "yfinance"
+
 
 # ============================================================================
 # UTILITIES & QUANT LOGIC
 # ============================================================================
-
-
-# --- FMP HELPERS (Hybridní Data Engine) ---
-def _fmp_get_json(endpoint: str) -> Optional[Any]:
-    if not FMP_API_KEY: return None
-    try:
-        url = f"https://financialmodelingprep.com/api/v3/{endpoint}?apikey={FMP_API_KEY}"
-        return requests.get(url).json()
-    except: return None
-
-def enrich_metrics_with_fmp(ticker: str, metrics: Dict[str, Metric]) -> Tuple[Dict[str, Metric], List[str]]:
-    """Doplní chybějící metriky (P/E, Debt, FCF Yield) z FMP, pokud Yahoo selže."""
-    notes = []
-    if not FMP_API_KEY: return metrics, notes
-
-    # 1. Ratios TTM (P/E, Current Ratio, Debt/Equity, ROE, Marže)
-    ratios = _fmp_get_json(f"ratios-ttm/{ticker}")
-    if ratios and isinstance(ratios, list):
-        r = ratios[0]
-        # P/E
-        if metrics.get("pe") and metrics["pe"].value is None:
-            metrics["pe"].value = safe_float(r.get("peRatioTTM"))
-            metrics["pe"].source = "FMP (Backup)"
-            notes.append("P/E doplněno z FMP")
-        # Current Ratio
-        if metrics.get("current_ratio") and metrics["current_ratio"].value is None:
-            metrics["current_ratio"].value = safe_float(r.get("currentRatioTTM"))
-        # Debt/Equity
-        if metrics.get("debt_to_equity") and metrics["debt_to_equity"].value is None:
-            metrics["debt_to_equity"].value = safe_float(r.get("debtToEquityTTM"))
-        # ROE
-        if metrics.get("roe") and metrics["roe"].value is None:
-            metrics["roe"].value = safe_float(r.get("returnOnEquityTTM"))
-        # Operating Margin
-        if metrics.get("operating_margin") and metrics["operating_margin"].value is None:
-            metrics["operating_margin"].value = safe_float(r.get("operatingProfitMarginTTM"))
-
-    # 2. Key Metrics TTM (FCF Yield)
-    km = _fmp_get_json(f"key-metrics-ttm/{ticker}")
-    if km and isinstance(km, list):
-        k = km[0]
-        if metrics.get("fcf_yield") and metrics["fcf_yield"].value is None:
-            metrics["fcf_yield"].value = safe_float(k.get("freeCashFlowYieldTTM"))
-            metrics["fcf_yield"].source = "FMP (Backup)"
-            notes.append("FCF Yield doplněn z FMP")
-            
-    return metrics, notes
-
-
 
 def calculate_roic(info: Dict[str, Any]) -> Optional[float]:
     """Aproximace ROIC: NOPAT / (Debt + Equity)."""
@@ -439,88 +386,12 @@ def clamp(v: Optional[float], lo: float, hi: float) -> Optional[float]:
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_ticker_info(ticker: str) -> Dict[str, Any]:
-    """
-    Získá data o firmě. Primárně z FMP (pokud je klíč), jinak zkouší Yahoo.
-    Skládá data z Profile, Ratios a Key Metrics, aby nahradil yfinance.
-    """
-    info = {}
-    
-    # 1. CESTA: FINANCIAL MODELING PREP (Priorita - Spolehlivé)
-    if FMP_API_KEY:
-        try:
-            # A) PROFILE (Cena, Sektor, Popis, Beta)
-            url_profile = f"https://financialmodelingprep.com/api/v3/profile/{ticker}?apikey={FMP_API_KEY}"
-            prof_data = requests.get(url_profile).json()
-            
-            if prof_data and isinstance(prof_data, list):
-                p = prof_data[0]
-                info.update({
-                    'longName': p.get('companyName'),
-                    'symbol': p.get('symbol'),
-                    'sector': p.get('sector'),
-                    'industry': p.get('industry'),
-                    'longBusinessSummary': p.get('description'),
-                    'currentPrice': p.get('price'),
-                    'regularMarketPrice': p.get('price'),
-                    'marketCap': p.get('mktCap'),
-                    'beta': p.get('beta'),
-                    'currency': p.get('currency'),
-                    'country': p.get('country'),
-                    'website': p.get('website')
-                })
-
-                # B) RATIOS TTM (P/E, ROE, Margins) - Klíčové pro metriky
-                url_ratios = f"https://financialmodelingprep.com/api/v3/ratios-ttm/{ticker}?apikey={FMP_API_KEY}"
-                ratios_data = requests.get(url_ratios).json()
-                if ratios_data and isinstance(ratios_data, list):
-                    r = ratios_data[0]
-                    info.update({
-                        'trailingPE': r.get('peRatioTTM'),
-                        'returnOnEquity': r.get('returnOnEquityTTM'),
-                        'returnOnAssets': r.get('returnOnAssetsTTM'),
-                        'operatingMargins': r.get('operatingProfitMarginTTM'),
-                        'profitMargins': r.get('netProfitMarginTTM'),
-                        'grossMargins': r.get('grossProfitMarginTTM'),
-                        'priceToBook': r.get('priceToBookRatioTTM'),
-                        'priceToSalesTrailing12Months': r.get('priceToSalesRatioTTM'),
-                        'dividendYield': r.get('dividendYielTTM'), 
-                        'payoutRatio': r.get('payoutRatioTTM'),
-                        'currentRatio': r.get('currentRatioTTM'),
-                        'quickRatio': r.get('quickRatioTTM')
-                    })
-
-                # C) KEY METRICS TTM (Debt, Cash, EV/EBITDA, FCF)
-                url_metrics = f"https://financialmodelingprep.com/api/v3/key-metrics-ttm/{ticker}?apikey={FMP_API_KEY}"
-                metrics_data = requests.get(url_metrics).json()
-                if metrics_data and isinstance(metrics_data, list):
-                    m = metrics_data[0]
-                    info.update({
-                        'enterpriseToEbitda': m.get('enterpriseValueOverEBITDATTM'),
-                        'debtToEquity': m.get('debtToEquityTTM'),
-                        'totalCash': m.get('cashAndCashEquivalentsTTM'),
-                        'totalDebt': m.get('totalDebtTTM'),
-                        'freeCashflow': m.get('freeCashFlowTTM'),
-                        'operatingCashflow': m.get('operatingCashFlowTTM'),
-                        'revenueGrowth': m.get('revenueGrowthTTM')
-                    })
-                
-                # Pokud se povedlo načíst aspoň cenu, vracíme FMP data
-                if info.get('currentPrice'):
-                    return info
-
-        except Exception as e:
-            print(f"FMP Info Error: {e}")
-
-    # 2. CESTA: YAHOO FINANCE (Fallback - Nespolehlivé na Cloudu)
+    """Fetch basic info from Yahoo Finance."""
     try:
         t = yf.Ticker(ticker)
-        y_info = t.info
-        if y_info and y_info.get('regularMarketPrice'):
-            return y_info
+        return t.info or {}
     except Exception:
-        pass
-
-    return info
+        return {}
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
@@ -732,89 +603,758 @@ def get_all_time_high(ticker: str) -> Optional[float]:
         return None
 
 
+def _redact_apikey(url: str) -> str:
+    try:
+        return re.sub(r"(apikey=)[^&]+", r"\1***", url, flags=re.IGNORECASE)
+    except Exception:
+        return url
+
+
+@st.cache_data(show_spinner=False, ttl=1800)
+def _http_get_json(url: str, headers_items: Tuple[Tuple[str, str], ...] = ()) -> Tuple[int, Any, str]:
+    """HTTP GET helper with Streamlit cache. Returns (status_code, json_or_None, error_text_or_empty)."""
+    try:
+        headers = dict(headers_items) if headers_items else None
+        r = requests.get(url, headers=headers, timeout=25)
+        status = int(getattr(r, "status_code", 0) or 0)
+        try:
+            return status, r.json(), ""
+        except Exception:
+            txt = getattr(r, "text", "") or ""
+            return status, None, txt[:2000]
+    except Exception as e:
+        return 0, None, str(e)
+
+
+@st.cache_data(show_spinner=False, ttl=86400)
+def _http_get_text(url: str, headers_items: Tuple[Tuple[str, str], ...] = ()) -> Tuple[int, str, str]:
+    """HTTP GET that returns raw text (needed for XML filings)."""
+    try:
+        headers = dict(headers_items) if headers_items else None
+        r = requests.get(url, headers=headers, timeout=25)
+        status = int(getattr(r, "status_code", 0) or 0)
+        return status, (getattr(r, "text", "") or ""), ""
+    except Exception as e:
+        return 0, "", str(e)
+
+
+@st.cache_data(show_spinner=False, ttl=86400)
+def _sec_ticker_to_cik_map(user_agent: str) -> Dict[str, int]:
+    """
+    SEC 'company_tickers.json' -> mapping {TICKER: cik_int}.
+    """
+    url = "https://www.sec.gov/files/company_tickers.json"
+    headers = (
+        ("User-Agent", user_agent),
+        ("Accept", "application/json"),
+        ("Accept-Encoding", "gzip, deflate"),
+    )
+    status, data, err = _http_get_json(url, headers)
+    if status != 200 or not isinstance(data, dict):
+        return {}
+    out: Dict[str, int] = {}
+    for _, v in data.items():
+        try:
+            t = str(v.get("ticker", "")).upper().strip()
+            cik = int(v.get("cik_str"))
+            if t:
+                out[t] = cik
+        except Exception:
+            continue
+    return out
+
+
+def _coerce_dt(x: Any) -> Optional[pd.Timestamp]:
+    try:
+        if x is None or (isinstance(x, float) and math.isnan(x)):
+            return None
+        return pd.to_datetime(x, errors="coerce")
+    except Exception:
+        return None
+
+
+def _norm_tx_label(raw_tx: Any, acquired_disposed: Any = None) -> str:
+    t = str(raw_tx or "").strip().lower()
+    ad = str(acquired_disposed or "").strip().upper()
+
+    # Prefer explicit acquired/disposed
+    if ad == "A":
+        return "Buy"
+    if ad == "D":
+        return "Sell"
+
+    # Fallback heuristics
+    if any(k in t for k in ["buy", "purchase", "acquire"]):
+        return "Buy"
+    if any(k in t for k in ["sell", "sale", "dispose"]):
+        return "Sell"
+    if t in {"p", "p - purchase"}:
+        return "Buy"
+    if t in {"s", "s - sale"}:
+        return "Sell"
+    return "Other"
+
+
+def _df_from_records(records: List[Dict[str, Any]], source: str) -> pd.DataFrame:
+    """Normalize disparate insider-trade payloads into a common dataframe."""
+    rows: List[Dict[str, Any]] = []
+    for it in records or []:
+        if not isinstance(it, dict):
+            continue
+
+        # Common-ish fields across providers
+        date_raw = (
+            it.get("transactionDate")
+            or it.get("transaction_date")
+            or it.get("filingDate")
+            or it.get("filing_date")
+            or it.get("acceptedDate")
+            or it.get("date")
+        )
+
+        # "transactionType" might already be human readable ("Purchase"/"Sale") or a code
+        tx_raw = (
+            it.get("transactionType")
+            or it.get("transaction_type")
+            or it.get("transaction_name")
+            or it.get("transactionName")
+            or it.get("type")
+            or it.get("transactionCode")
+            or it.get("transaction_code")
+        )
+        ad = (
+            it.get("acquisitionOrDisposition")
+            or it.get("transactionAcquiredDisposedCode")
+            or it.get("transactionAcquiredDisposedCode")
+            or it.get("acquiredDisposedCode")
+        )
+
+        owner = (
+            it.get("insider_name")
+            or it.get("insiderName")
+            or it.get("name")
+            or it.get("reportingName")
+            or it.get("reporting_name")
+            or it.get("reportingOwner")
+            or it.get("reportingOwnerName")
+            or it.get("reporting_owner_name")
+        )
+
+        position = (
+            it.get("insider_position")
+            or it.get("insiderPosition")
+            or it.get("insider_title")
+            or it.get("reportingTitle")
+            or it.get("ownerTitle")
+            or it.get("typeOfOwner")
+            or it.get("role")
+        )
+
+        code = it.get("transactionCode") or it.get("transaction_code") or it.get("transaction_code") or it.get("transactionCode")
+        security = it.get("securityTitle") or it.get("security") or it.get("security_title") or it.get("securityTitleValue")
+
+        # Quantities / prices / values
+        shares = (
+            it.get("securitiesTransacted")
+            or it.get("securities_transacted")
+            or it.get("transactionShares")
+            or it.get("shares")
+            or it.get("share")
+        )
+        price = (
+            it.get("price")
+            or it.get("transactionPrice")
+            or it.get("transactionPricePerShare")
+            or it.get("transaction_price")
+            or it.get("transaction_price_per_share")
+        )
+        value = (
+            it.get("transactionValue")
+            or it.get("transaction_value")
+            or it.get("value")
+            or it.get("totalValue")
+            or it.get("amount")
+        )
+
+        filing_url = (
+            it.get("sec_filing_url")
+            or it.get("secFilingUrl")
+            or it.get("filingURL")
+            or it.get("filingUrl")
+            or it.get("url")
+        )
+
+        # Parse numerics robustly
+        def _to_float(x):
+            try:
+                if x is None:
+                    return None
+                s = str(x).strip()
+                if s == "" or s.lower() in {"nan", "none"}:
+                    return None
+                # remove commas
+                s = s.replace(",", "")
+                return float(s)
+            except Exception:
+                return None
+
+        shares_f = _to_float(shares)
+        price_f = _to_float(price)
+        value_f = _to_float(value)
+
+        if value_f is None and shares_f is not None and price_f is not None:
+            value_f = shares_f * price_f
+
+        dtv = _coerce_dt(date_raw)
+        if dtv is None or pd.isna(dtv):
+            continue
+
+        rows.append({
+            "Date": dtv.date(),
+            "Transaction": _norm_tx_label(tx_raw, ad),
+            "Position": position or "—",
+            "Owner": owner,
+            "Security": security,
+            "Code": code,
+            "Shares": shares_f,
+            "Price": price_f,
+            "Value": value_f,
+            "Source": source,
+            "FilingURL": filing_url,
+        })
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.sort_values("Date", ascending=False)
+    return df
+
+
+def _parse_fmp_company_outlook(payload: Any) -> pd.DataFrame:
+    if not isinstance(payload, dict):
+        return pd.DataFrame()
+    # FMP legacy doc mentions "insideTrades" but this can vary.
+    inside = (
+        payload.get("insideTrades")
+        or payload.get("insiderTrades")
+        or payload.get("insiderTrading")
+        or payload.get("insiderTrade")
+    )
+    if isinstance(inside, dict):
+        # some variants might nest list deeper
+        inside = inside.get("data") or inside.get("items") or inside.get("results")
+    if not isinstance(inside, list):
+        return pd.DataFrame()
+    return _df_from_records(inside, source="FMP legacy: company-outlook")
+
+
+def _parse_fmp_stable(payload: Any) -> pd.DataFrame:
+    if isinstance(payload, list):
+        return _df_from_records(payload, source="FMP stable: insider-trading/search")
+    if isinstance(payload, dict):
+        # some endpoints wrap results
+        inner = payload.get("data") or payload.get("items") or payload.get("results") or payload.get("insiderTrades")
+        if isinstance(inner, list):
+            return _df_from_records(inner, source="FMP stable: insider-trading/search")
+    return pd.DataFrame()
+
+
+
+def _extract_api_error(payload: Any, err_text: str = "") -> Optional[str]:
+    """Normalize error text across providers."""
+    if err_text:
+        return str(err_text)[:500]
+    if isinstance(payload, dict):
+        for k in ("Error Message", "error", "Error", "message", "Information", "Note", "detail"):
+            v = payload.get(k)
+            if v:
+                return str(v)[:500]
+    return None
+
+
+def _payload_to_records(payload: Any) -> Optional[List[Dict[str, Any]]]:
+    """Try to find a list[dict] of transactions inside various payload shapes."""
+    if isinstance(payload, list) and (not payload or isinstance(payload[0], dict)):
+        return payload
+    if isinstance(payload, dict):
+        # common keys
+        for k in ("data", "items", "results", "insiderTrades", "insideTrades", "insiderTransactions", "transactions"):
+            v = payload.get(k)
+            if isinstance(v, list) and (not v or isinstance(v[0], dict)):
+                return v
+        # fallback: first list of dicts found
+        for v in payload.values():
+            if isinstance(v, list) and (not v or isinstance(v[0], dict)):
+                return v
+    return None
+
+
 @st.cache_data(show_spinner=False, ttl=3600)
+def _fetch_insider_from_alpha_vantage(ticker: str) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """
+    Free-ish alternative: Alpha Vantage Insider Transactions.
+    Docs: function=INSIDER_TRANSACTIONS&symbol=...&apikey=...
+    """
+    meta: Dict[str, Any] = {
+        "provider": "AlphaVantage",
+        "endpoint": "query?function=INSIDER_TRANSACTIONS",
+        "ticker": ticker,
+        "status": None,
+        "items": 0,
+        "note": None,
+        "error": None,
+        "url": None,
+    }
+    if not ALPHAVANTAGE_API_KEY:
+        meta["note"] = "ALPHAVANTAGE_API_KEY není nastaven."
+        return pd.DataFrame(), meta
+
+    url = f"https://www.alphavantage.co/query?function=INSIDER_TRANSACTIONS&symbol={ticker}&apikey={ALPHAVANTAGE_API_KEY}"
+    meta["url"] = _redact_apikey(url)
+    status, payload, err = _http_get_json(url)
+    meta["status"] = status
+
+    # AlphaVantage often returns "Note"/"Information" on rate limit
+    meta["error"] = _extract_api_error(payload, err)
+    if status != 200 or not payload:
+        return pd.DataFrame(), meta
+
+    recs = _payload_to_records(payload)
+    if not recs:
+        # some responses put everything in a single dict; keep debug info
+        return pd.DataFrame(), meta
+
+    df = _df_from_records(recs, source="Alpha Vantage: INSIDER_TRANSACTIONS")
+    meta["items"] = int(len(df)) if df is not None else 0
+    return df, meta
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _fetch_insider_from_finnhub(ticker: str) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """
+    Alternative: Finnhub insider transactions.
+    Endpoint: /stock/insider-transactions?symbol=...&token=...
+    """
+    meta: Dict[str, Any] = {
+        "provider": "Finnhub",
+        "endpoint": "api/v1/stock/insider-transactions",
+        "ticker": ticker,
+        "status": None,
+        "items": 0,
+        "note": None,
+        "error": None,
+        "url": None,
+    }
+    if not FINNHUB_API_KEY:
+        meta["note"] = "FINNHUB_API_KEY není nastaven."
+        return pd.DataFrame(), meta
+
+    url = f"https://finnhub.io/api/v1/stock/insider-transactions?symbol={ticker}&token={FINNHUB_API_KEY}"
+    meta["url"] = re.sub(r"(token=)[^&]+", r"\1***", url, flags=re.IGNORECASE)
+    status, payload, err = _http_get_json(url)
+    meta["status"] = status
+    meta["error"] = _extract_api_error(payload, err)
+    if status != 200 or not payload:
+        return pd.DataFrame(), meta
+
+    recs = _payload_to_records(payload)
+    if not recs:
+        # Finnhub usually returns {"data":[...], ...}
+        return pd.DataFrame(), meta
+
+    df = _df_from_records(recs, source="Finnhub: insider-transactions")
+    meta["items"] = int(len(df)) if df is not None else 0
+    return df, meta
+
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _fetch_insider_from_api_ninjas(ticker: str) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """
+    Alternative: API Ninjas insider transactions.
+    Endpoint: https://api.api-ninjas.com/v1/insidertransactions?ticker=...
+    Auth: X-Api-Key header.
+    """
+    meta: Dict[str, Any] = {
+        "provider": "APINinjas",
+        "endpoint": "v1/insidertransactions",
+        "ticker": ticker,
+        "status": None,
+        "items": 0,
+        "note": None,
+        "error": None,
+        "url": f"https://api.api-ninjas.com/v1/insidertransactions?ticker={ticker}",
+    }
+    if not NINJAS_API_KEY:
+        meta["note"] = "NINJAS_API_KEY (nebo Ninjas_API_KEY) není nastaven."
+        return pd.DataFrame(), meta
+
+    headers = (("X-Api-Key", NINJAS_API_KEY), ("Accept", "application/json"))
+    status, payload, err = _http_get_json(meta["url"], headers)
+    meta["status"] = status
+    meta["error"] = _extract_api_error(payload, err)
+
+    if status != 200 or payload is None:
+        return pd.DataFrame(), meta
+
+    # API Ninjas returns a JSON array
+    recs: Optional[List[Dict[str, Any]]]
+    if isinstance(payload, list):
+        recs = payload
+    else:
+        recs = _payload_to_records(payload)
+
+    if not recs:
+        return pd.DataFrame(), meta
+
+    df = _df_from_records(recs, source="API Ninjas: insidertransactions")
+    meta["items"] = int(len(df)) if df is not None else 0
+    return df, meta
+
+def _sec_pick_xml_from_index(index_payload: Any) -> Optional[str]:
+    """Pick a likely Form 4 XML filename from SEC index.json listing."""
+    if not isinstance(index_payload, dict):
+        return None
+    items = ((index_payload.get("directory") or {}).get("item") or [])
+    names = []
+    for it in items:
+        try:
+            nm = str(it.get("name", "")).strip()
+            if nm:
+                names.append(nm)
+        except Exception:
+            continue
+    if not names:
+        return None
+
+    def score(n: str) -> Tuple[int, int]:
+        nl = n.lower()
+        s = 0
+        if nl.endswith(".xml"):
+            s += 100
+        if "xsl" in nl:
+            s -= 50
+        if "form4" in nl or "f345" in nl:
+            s += 30
+        if "primary" in nl:
+            s += 15
+        # shorter names often better
+        return (-s, len(nl))
+
+    xmls = [n for n in names if n.lower().endswith(".xml")]
+    if not xmls:
+        return None
+    return sorted(xmls, key=score)[0]
+
+
+@st.cache_data(show_spinner=False, ttl=21600)
+def _fetch_insider_from_sec(ticker: str, max_filings: int = 12, max_transactions: int = 250) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """
+    Free fallback: SEC EDGAR Form 4 parsing via:
+    - company_tickers.json (ticker->CIK)
+    - submissions CIK##########.json (recent filings)
+    - index.json per filing directory to locate the real XML
+    """
+    meta: Dict[str, Any] = {"provider": "SEC", "ticker": ticker, "cik": None, "status": None, "items": 0, "note": None}
+
+    ua = (SEC_USER_AGENT or "").strip()
+    if not ua or "your_email" in ua:
+        meta["note"] = "SEC_USER_AGENT není nastaven (doporučeno)."
+
+    # Build ticker->CIK map
+    cik_map = _sec_ticker_to_cik_map(ua or "StockPickerPro/1.0")
+    cik_int = cik_map.get(ticker.upper())
+    if not cik_int:
+        meta["note"] = (meta["note"] or "") + " Ticker nenalezen v SEC mappingu."
+        return pd.DataFrame(), meta
+
+    meta["cik"] = cik_int
+    cik_padded = str(cik_int).zfill(10)
+
+    subs_url = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
+    headers_json = (
+        ("User-Agent", ua or "StockPickerPro/1.0"),
+        ("Accept", "application/json"),
+        ("Accept-Encoding", "gzip, deflate"),
+    )
+    status, subs, err = _http_get_json(subs_url, headers_json)
+    meta["status"] = status
+    if status != 200 or not isinstance(subs, dict):
+        meta["note"] = (meta["note"] or "") + f" Submissions error: {str(err)[:200]}"
+        return pd.DataFrame(), meta
+
+    recent = ((subs.get("filings") or {}).get("recent") or {})
+    forms = recent.get("form") or []
+    accs = recent.get("accessionNumber") or []
+    fdates = recent.get("filingDate") or []
+
+    # collect recent Form 4/4A
+    idxs = [i for i, f in enumerate(forms) if str(f).startswith("4")]
+    idxs = idxs[:max_filings]
+    if not idxs:
+        meta["note"] = (meta["note"] or "") + " Žádné Form 4 v recent submissions."
+        return pd.DataFrame(), meta
+
+    import xml.etree.ElementTree as ET
+
+    rows: List[Dict[str, Any]] = []
+    headers_xml = (
+        ("User-Agent", ua or "StockPickerPro/1.0"),
+        ("Accept", "application/xml,text/xml,text/plain,*/*"),
+        ("Accept-Encoding", "gzip, deflate"),
+    )
+
+    for i in idxs:
+        try:
+            accession = str(accs[i])
+            accession_nodash = accession.replace("-", "")
+            filing_date = fdates[i] if i < len(fdates) else None
+
+            # Use index.json to locate XML
+            index_url = f"https://data.sec.gov/Archives/edgar/data/{cik_int}/{accession_nodash}/index.json"
+            st_i, index_payload, err_i = _http_get_json(index_url, headers_json)
+            if st_i != 200 or not isinstance(index_payload, dict):
+                # fallback: try primary document directly via submissions in older logic (skipped here)
+                continue
+
+            xml_name = _sec_pick_xml_from_index(index_payload)
+            if not xml_name:
+                continue
+
+            filing_url = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession_nodash}/{xml_name}"
+            st_x, xml_text, err_x = _http_get_text(filing_url, headers_xml)
+            if st_x != 200 or not xml_text:
+                continue
+
+            # parse XML
+            if "<ownershipDocument" not in xml_text and "<nonDerivativeTransaction" not in xml_text:
+                # sometimes it's wrapped; still try parse if it looks like XML
+                if "<" not in xml_text[:50]:
+                    continue
+
+            root = ET.fromstring(xml_text.encode("utf-8", errors="ignore"))
+
+            owner = None
+            officer_title = None
+            try:
+                owner = root.findtext(".//{*}reportingOwnerId/{*}rptOwnerName")
+            except Exception:
+                owner = None
+            try:
+                officer_title = root.findtext(".//{*}reportingOwnerRelationship/{*}officerTitle")
+            except Exception:
+                officer_title = None
+
+            # non-derivative transactions
+            for tx in root.findall(".//{*}nonDerivativeTransaction"):
+                dt_val = tx.findtext(".//{*}transactionDate/{*}value") or filing_date
+                code = tx.findtext(".//{*}transactionCoding/{*}transactionCode")
+                ad = tx.findtext(".//{*}transactionAcquiredDisposedCode/{*}value")
+                shares = tx.findtext(".//{*}transactionShares/{*}value")
+                price = tx.findtext(".//{*}transactionPricePerShare/{*}value")
+                sec_title = tx.findtext(".//{*}securityTitle/{*}value")
+
+                try:
+                    shares_f = float(shares) if shares else None
+                except Exception:
+                    shares_f = None
+                try:
+                    price_f = float(price) if price else None
+                except Exception:
+                    price_f = None
+
+                val_f = (shares_f * price_f) if (shares_f is not None and price_f is not None) else None
+                tx_label = _norm_tx_label(code, ad)
+
+                dtp = _coerce_dt(dt_val)
+                if dtp is None or pd.isna(dtp):
+                    continue
+
+                rows.append({
+                    "Date": dtp.date(),
+                    "Transaction": tx_label,
+                    "Position": officer_title or ("Director/Officer" if owner else "—"),
+                    "Value": val_f,
+                    "Shares": shares_f,
+                    "Price": price_f,
+                    "Owner": owner,
+                    "Security": sec_title,
+                    "Code": code,
+                    "Source": "SEC Form 4",
+                    "FilingURL": filing_url,
+                })
+                if len(rows) >= max_transactions:
+                    break
+
+            time.sleep(0.12)
+            if len(rows) >= max_transactions:
+                break
+        except Exception:
+            continue
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.sort_values("Date", ascending=False)
+    meta["items"] = int(len(df))
+    return df, meta
+
+
+def fetch_insider_transactions_multi(ticker: str) -> Tuple[Optional[pd.DataFrame], Dict[str, Any]]:
+    """
+    Multi-source insider fetch with rich debug.
+
+    Sources (in priority order):
+    1) FMP stable (often paid)  
+    2) FMP legacy company-outlook (often blocked) 
+    3) API Ninjas insidertransactions (free key) 
+    4) Alpha Vantage INSIDER_TRANSACTIONS (free key) 
+    5) Finnhub insider-transactions (token) 
+    6) SEC EDGAR Form 4 parsing (free) 
+
+    Returns a merged dataframe (deduplicated) if any source has data.
+    """
+    meta: Dict[str, Any] = {
+        "ticker": ticker,
+        "fmp_key_loaded": bool(FMP_API_KEY),
+        "fmp_key_len": len(FMP_API_KEY) if FMP_API_KEY else 0,
+        "av_key_loaded": bool(ALPHAVANTAGE_API_KEY),
+        "av_key_len": len(ALPHAVANTAGE_API_KEY) if ALPHAVANTAGE_API_KEY else 0,
+        "finnhub_key_loaded": bool(FINNHUB_API_KEY),
+        "finnhub_key_len": len(FINNHUB_API_KEY) if FINNHUB_API_KEY else 0,
+        "ninjas_key_loaded": bool(NINJAS_API_KEY),
+        "ninjas_key_len": len(NINJAS_API_KEY) if NINJAS_API_KEY else 0,
+        "chosen_source": None,
+        "attempts": [],
+    }
+
+    def add_attempt(d: Dict[str, Any]) -> None:
+        try:
+            meta["attempts"].append(d)
+        except Exception:
+            pass
+
+    dfs: List[pd.DataFrame] = []
+    sources_used: List[str] = []
+
+    # 1) FMP stable endpoint
+    if FMP_API_KEY:
+        url = f"https://financialmodelingprep.com/stable/insider-trading/search?symbol={ticker}&page=0&limit=100&apikey={FMP_API_KEY}"
+        status, payload, err = _http_get_json(url)
+        add_attempt({
+            "provider": "FMP",
+            "endpoint": "stable/insider-trading/search",
+            "url": _redact_apikey(url),
+            "status_code": status,
+            "items": len(payload) if isinstance(payload, list) else None,
+            "error": _extract_api_error(payload, err),
+        })
+        if status == 200:
+            df = _parse_fmp_stable(payload)
+            if df is not None and not df.empty:
+                dfs.append(df)
+                sources_used.append("FMP stable")
+
+    # 2) FMP legacy company outlook
+    if FMP_API_KEY:
+        url = f"https://financialmodelingprep.com/api/v4/company-outlook?symbol={ticker}&apikey={FMP_API_KEY}"
+        status, payload, err = _http_get_json(url)
+        add_attempt({
+            "provider": "FMP",
+            "endpoint": "api/v4/company-outlook",
+            "url": _redact_apikey(url),
+            "status_code": status,
+            "items": None,
+            "error": _extract_api_error(payload, err),
+        })
+        if status == 200:
+            df = _parse_fmp_company_outlook(payload)
+            if df is not None and not df.empty:
+                dfs.append(df)
+                sources_used.append("FMP legacy")
+
+    # 3) API Ninjas
+    df_nj, nj_meta = _fetch_insider_from_api_ninjas(ticker)
+    add_attempt(nj_meta)
+    if df_nj is not None and not df_nj.empty:
+        dfs.append(df_nj)
+        sources_used.append("API Ninjas")
+
+    # 4) Alpha Vantage
+    df_av, av_meta = _fetch_insider_from_alpha_vantage(ticker)
+    add_attempt(av_meta)
+    if df_av is not None and not df_av.empty:
+        dfs.append(df_av)
+        sources_used.append("Alpha Vantage")
+
+    # 5) Finnhub
+    df_fh, fh_meta = _fetch_insider_from_finnhub(ticker)
+    add_attempt(fh_meta)
+    if df_fh is not None and not df_fh.empty:
+        dfs.append(df_fh)
+        sources_used.append("Finnhub")
+
+    # 6) SEC fallback
+    df_sec, sec_meta = _fetch_insider_from_sec(ticker)
+    add_attempt(sec_meta)
+    if df_sec is not None and not df_sec.empty:
+        dfs.append(df_sec)
+        sources_used.append("SEC Form 4")
+
+    if not dfs:
+        return None, meta
+
+    # Merge + dedupe (ignore Source so the same transaction coming from multiple providers doesn't duplicate)
+    merged = pd.concat([d for d in dfs if isinstance(d, pd.DataFrame) and not d.empty], ignore_index=True, sort=False)
+
+    # Ensure expected columns exist
+    for col in ["Owner", "Position", "Code", "Security", "Shares", "Price", "Value", "Source", "FilingURL", "Transaction", "Date"]:
+        if col not in merged.columns:
+            merged[col] = None
+
+    # Make date comparable
+    try:
+        merged["Date"] = pd.to_datetime(merged["Date"], errors="coerce").dt.date
+    except Exception:
+        pass
+
+    # Deduplicate core identity fields
+    dedupe_cols = [c for c in ["Date", "Owner", "Code", "Shares", "Price", "Value", "Transaction"] if c in merged.columns]
+    if dedupe_cols:
+        merged = merged.drop_duplicates(subset=dedupe_cols, keep="first")
+
+    merged = merged.sort_values("Date", ascending=False)
+
+    if len(sources_used) == 1:
+        meta["chosen_source"] = sources_used[0]
+    else:
+        meta["chosen_source"] = "Merged: " + ", ".join(sources_used)
+
+    return merged, meta
+
+
 def fetch_insider_transactions_fmp(ticker: str) -> Optional[pd.DataFrame]:
     """
-    FALLBACK: Načítá insider obchody scrapováním Finvizu (protože API FMP jsou placená).
+    Backwards-compatible wrapper used throughout the app.
+    Stores debug info into st.session_state["insider_debug"].
     """
-    url = f"https://finviz.com/quote.ashx?t={ticker}"
-    # Finviz vyžaduje User-Agent, aby si myslel, že jsme prohlížeč
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-    
+    df, meta = fetch_insider_transactions_multi(ticker)
     try:
-        response = requests.get(url, headers=headers)
-        if response.status_code != 200:
-            return None
-        
-        # Pandas umí vycucnout všechny tabulky z HTML
-        # Tabulka insiderů je obvykle ta poslední na stránce Finvizu
-        dfs = pd.read_html(response.text)
-        
-        # Hledáme tabulku, která obsahuje slova 'Transaction' a 'SEC Form 4'
-        insider_df = None
-        for df in dfs:
-            if 'Transaction' in df.columns and 'SEC Form 4' in df.columns:
-                insider_df = df
-                break
-                
-        # Pokud jsme tabulku nenašli, zkusíme vzít poslední (často to tak je)
-        if insider_df is None and len(dfs) > 5:
-            insider_df = dfs[-1]
-            
-        if insider_df is None or insider_df.empty:
-            return pd.DataFrame()
+        st.session_state["insider_debug"] = meta
+    except Exception:
+        pass
+    return df
 
-        # --- ČIŠTĚNÍ DAT Z FINVIZU ---
-        # Finviz má sloupce: [Owner, Relationship, Date, Transaction, Cost, #Shares, Value ($), #Shares Total, SEC Form 4]
-        
-        # Přejmenování pro kompatibilitu s tvým skriptem
-        rename_map = {
-            'Date': 'Date',
-            'Transaction': 'Transaction',
-            'Relationship': 'Position',
-            'Value ($)': 'Value',
-            '#Shares': 'Shares',
-            'Cost': 'Price'
-        }
-        
-        # Flexibilní přejmenování (ignoruje, co tam není)
-        insider_df = insider_df.rename(columns=rename_map)
-        
-        # Filtrujeme jen sloupce, které potřebujeme
-        needed_cols = ['Date', 'Transaction', 'Position', 'Value']
-        
-        # Pokud chybí Value, zkusíme ji dopočítat
-        if 'Value' not in insider_df.columns and 'Shares' in insider_df.columns and 'Price' in insider_df.columns:
-             def clean_num(x):
-                 if isinstance(x, str): return pd.to_numeric(x.replace(',', ''), errors='coerce')
-                 return x
-             insider_df['Value'] = clean_num(insider_df['Shares']) * clean_num(insider_df['Price'])
 
-        # Finální formátování data (Finviz má "Feb 13", musíme přidat rok)
-        def parse_finviz_date(d_str):
-            try:
-                current_year = dt.datetime.now().year
-                return pd.to_datetime(f"{d_str} {current_year}", format="%b %d %Y")
-            except:
-                return pd.NaT
 
-        if 'Date' in insider_df.columns:
-            insider_df['Date'] = insider_df['Date'].apply(parse_finviz_date)
-        
-        # Čištění sloupce Value (odstranění čárek)
-        if 'Value' in insider_df.columns:
-             insider_df['Value'] = insider_df['Value'].astype(str).str.replace(',', '').apply(pd.to_numeric, errors='coerce')
-
-        return insider_df
-
-    except Exception as e:
-        print(f"Finviz Scraper Error: {e}")
-        return pd.DataFrame()
-
-# ============================================================================
-# METRICS & SCORING
-# ============================================================================
-
+@dataclass
+class Metric:
+    name: str
+    value: Optional[float]
+    min_val: Optional[float] = None
+    max_val: Optional[float] = None
+    target_below: Optional[float] = None
+    target_above: Optional[float] = None
+    weight: float = 1.0
+    source: str = "yfinance"
 
 
 def extract_metrics(info: Dict[str, Any], ticker: str) -> Dict[str, Metric]:
@@ -1693,8 +2233,6 @@ def get_advanced_verdict(
 # ============================================================================
 
 
-
-
 def render_twitter_timeline(handle: str, height: int = 600) -> None:
     """Render X/Twitter content without embeds (widgets are often blocked)."""
     handle = (handle or "").lstrip("@").strip()
@@ -2205,7 +2743,7 @@ def main():
     ticker = (st.session_state.get("marketCap") or ticker_input) if analyze_btn else st.session_state.get("last_ticker", "AAPL")
     st.session_state["last_ticker"] = ticker
     
-# Fetch data
+    # Fetch data
     with st.spinner(f"📊 Načítám data pro {ticker}..."):
         info = fetch_ticker_info(ticker)
         
@@ -2214,19 +2752,8 @@ def main():
             st.stop()
         
         company = info.get("longName") or info.get("shortName") or ticker
-        metrics = extract_metrics(info, ticker)  # <--- ZDE BYLA CHYBA (nyní zarovnáno)
-
-        # --- NOVÉ: HYBRID FIX (Doplnění dat z FMP) ---
-        # Pokud máš nastavený FMP_API_KEY, pokusí se najít chybějící P/E, Debt atd.
-        metrics, fmp_notes = enrich_metrics_with_fmp(ticker, metrics)
-        
-        # Volitelně: Zobrazit info, že se data doplnila
-        if fmp_notes and st.sidebar.checkbox("Show Data Source Info", value=False):
-            st.sidebar.success(f"Doplněno z FMP: {', '.join(fmp_notes)}")
-        # -----------------------------------------------
-
+        metrics = extract_metrics(info, ticker)
         price_history = fetch_price_history(ticker, period="1y")
-        
         income, balance, cashflow = fetch_financials(ticker)
         
         # Advanced data
@@ -2479,7 +3006,7 @@ def main():
         with ins3:
             st.metric("Prodeje (6M)", insider_signal.get('recent_sells', 0))
         
-        if insider_signal.get("marketCap"):
+        if insider_signal.get("cluster_buying"):
             st.markdown(
                 '<div class="success-box">🔥 <b>Cluster Buying Detected!</b> Více insiderů nakupuje současně - silný bullish signál.</div>',
                 unsafe_allow_html=True
@@ -2487,6 +3014,39 @@ def main():
         
         for insight in insider_signal.get('insights', []):
             st.write(f"• {insight}")
+
+        with st.expander("🔧 Insider debug", expanded=False):
+            dbg = st.session_state.get("insider_debug", None)
+            if dbg:
+                # Compact table view first (easier to read than raw JSON)
+                try:
+                    attempts = dbg.get("attempts") if isinstance(dbg, dict) else None
+                    if isinstance(attempts, list) and attempts:
+                        rows = []
+                        for a in attempts:
+                            if not isinstance(a, dict):
+                                continue
+                            rows.append({
+                                "Provider": a.get("provider") or a.get("provider_name") or "—",
+                                "Endpoint": a.get("endpoint") or "—",
+                                "Status": a.get("status_code") if a.get("status_code") is not None else a.get("status"),
+                                "Items": a.get("items"),
+                                "Error/Note": a.get("error") or a.get("note"),
+                            })
+                        if rows:
+                            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                    # Useful headline
+                    if isinstance(dbg, dict):
+                        cs = dbg.get("chosen_source")
+                        if cs:
+                            st.caption(f"Chosen source: **{cs}**")
+                except Exception:
+                    pass
+
+                # Raw JSON for full details
+                st.json(dbg)
+            else:
+                st.info("Debug info není k dispozici.")
     
     # ------------------------------------------------------------------------
     # TAB 2: Market Watch (Makro & Earnings Calendar)
