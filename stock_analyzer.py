@@ -12,7 +12,7 @@ import os
 import warnings
 warnings.filterwarnings('ignore', category=DeprecationWarning)
 warnings.filterwarnings('ignore', category=FutureWarning, module=r'google\.generativeai\..*')
-import requests
+
 import re
 import json
 import math
@@ -277,31 +277,10 @@ MACRO_CALENDAR = [
 ]
 
 
-
 # ============================================================================
-# UTILITIES & QUANT LOGIC
+# UTILITIES
 # ============================================================================
 
-def calculate_roic(info: Dict[str, Any]) -> Optional[float]:
-    """Aproximace ROIC: NOPAT / (Debt + Equity)."""
-    try:
-        ebit = safe_float(info.get("ebitda")) # EBITDA jako proxy
-        nopat = ebit * 0.79 if ebit else None # 21% US Tax proxy
-        invested_capital = (safe_float(info.get("totalDebt")) or 0) + (safe_float(info.get("totalStockholderEquity")) or 0)
-        return safe_div(nopat, invested_capital)
-    except: return None
-
-def detect_market_regime(price_history: pd.DataFrame) -> str:
-    """Detekce režimu na základě volatility a trendu za 6 měsíců."""
-    if price_history.empty or len(price_history) < 20: return "Stable / Neutral"
-    returns = price_history['Close'].pct_change().dropna()
-    vol = returns.std() * math.sqrt(252)
-    avg_ret = returns.mean() * 252
-    
-    if vol > 0.28 and avg_ret < -0.10: return "High Volatility / Bear"
-    if vol < 0.18 and avg_ret > 0.05: return "Low Volatility / Bull"
-    return "Stable / Transition"
-    
 def ensure_data_dir() -> None:
     os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -381,88 +360,12 @@ def clamp(v: Optional[float], lo: float, hi: float) -> Optional[float]:
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_ticker_info(ticker: str) -> Dict[str, Any]:
-    """
-    Získá data o firmě. Primárně z FMP (pokud je klíč), jinak zkouší Yahoo.
-    Skládá data z Profile, Ratios a Key Metrics, aby nahradil yfinance.
-    """
-    info = {}
-    
-    # 1. CESTA: FINANCIAL MODELING PREP (Priorita - Spolehlivé)
-    if FMP_API_KEY:
-        try:
-            # A) PROFILE (Cena, Sektor, Popis, Beta)
-            url_profile = f"https://financialmodelingprep.com/api/v3/profile/{ticker}?apikey={FMP_API_KEY}"
-            prof_data = requests.get(url_profile).json()
-            
-            if prof_data and isinstance(prof_data, list):
-                p = prof_data[0]
-                info.update({
-                    'longName': p.get('companyName'),
-                    'symbol': p.get('symbol'),
-                    'sector': p.get('sector'),
-                    'industry': p.get('industry'),
-                    'longBusinessSummary': p.get('description'),
-                    'currentPrice': p.get('price'),
-                    'regularMarketPrice': p.get('price'),
-                    'marketCap': p.get('mktCap'),
-                    'beta': p.get('beta'),
-                    'currency': p.get('currency'),
-                    'country': p.get('country'),
-                    'website': p.get('website')
-                })
-
-                # B) RATIOS TTM (P/E, ROE, Margins) - Klíčové pro metriky
-                url_ratios = f"https://financialmodelingprep.com/api/v3/ratios-ttm/{ticker}?apikey={FMP_API_KEY}"
-                ratios_data = requests.get(url_ratios).json()
-                if ratios_data and isinstance(ratios_data, list):
-                    r = ratios_data[0]
-                    info.update({
-                        'trailingPE': r.get('peRatioTTM'),
-                        'returnOnEquity': r.get('returnOnEquityTTM'),
-                        'returnOnAssets': r.get('returnOnAssetsTTM'),
-                        'operatingMargins': r.get('operatingProfitMarginTTM'),
-                        'profitMargins': r.get('netProfitMarginTTM'),
-                        'grossMargins': r.get('grossProfitMarginTTM'),
-                        'priceToBook': r.get('priceToBookRatioTTM'),
-                        'priceToSalesTrailing12Months': r.get('priceToSalesRatioTTM'),
-                        'dividendYield': r.get('dividendYielTTM'), 
-                        'payoutRatio': r.get('payoutRatioTTM'),
-                        'currentRatio': r.get('currentRatioTTM'),
-                        'quickRatio': r.get('quickRatioTTM')
-                    })
-
-                # C) KEY METRICS TTM (Debt, Cash, EV/EBITDA, FCF)
-                url_metrics = f"https://financialmodelingprep.com/api/v3/key-metrics-ttm/{ticker}?apikey={FMP_API_KEY}"
-                metrics_data = requests.get(url_metrics).json()
-                if metrics_data and isinstance(metrics_data, list):
-                    m = metrics_data[0]
-                    info.update({
-                        'enterpriseToEbitda': m.get('enterpriseValueOverEBITDATTM'),
-                        'debtToEquity': m.get('debtToEquityTTM'),
-                        'totalCash': m.get('cashAndCashEquivalentsTTM'),
-                        'totalDebt': m.get('totalDebtTTM'),
-                        'freeCashflow': m.get('freeCashFlowTTM'),
-                        'operatingCashflow': m.get('operatingCashFlowTTM'),
-                        'revenueGrowth': m.get('revenueGrowthTTM')
-                    })
-                
-                # Pokud se povedlo načíst aspoň cenu, vracíme FMP data
-                if info.get('currentPrice'):
-                    return info
-
-        except Exception as e:
-            print(f"FMP Info Error: {e}")
-
-    # 2. CESTA: YAHOO FINANCE (Fallback - Nespolehlivé na Cloudu)
+    """Fetch basic info from Yahoo Finance."""
     try:
         t = yf.Ticker(ticker)
-        y_info = t.info
-        if y_info and y_info.get('regularMarketPrice'):
-            return y_info
+        return t.info or {}
     except Exception:
-        pass
-
-    return info
+        return {}
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
@@ -675,83 +578,14 @@ def get_all_time_high(ticker: str) -> Optional[float]:
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def fetch_insider_transactions_fmp(ticker: str) -> Optional[pd.DataFrame]:
-    """
-    FALLBACK: Načítá insider obchody scrapováním Finvizu (protože API FMP jsou placená).
-    """
-    url = f"https://finviz.com/quote.ashx?t={ticker}"
-    # Finviz vyžaduje User-Agent, aby si myslel, že jsme prohlížeč
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-    
+def fetch_insider_transactions(ticker: str) -> Optional[pd.DataFrame]:
+    """Fetch insider transactions."""
     try:
-        response = requests.get(url, headers=headers)
-        if response.status_code != 200:
-            return None
-        
-        # Pandas umí vycucnout všechny tabulky z HTML
-        # Tabulka insiderů je obvykle ta poslední na stránce Finvizu
-        dfs = pd.read_html(response.text)
-        
-        # Hledáme tabulku, která obsahuje slova 'Transaction' a 'SEC Form 4'
-        insider_df = None
-        for df in dfs:
-            if 'Transaction' in df.columns and 'SEC Form 4' in df.columns:
-                insider_df = df
-                break
-                
-        # Pokud jsme tabulku nenašli, zkusíme vzít poslední (často to tak je)
-        if insider_df is None and len(dfs) > 5:
-            insider_df = dfs[-1]
-            
-        if insider_df is None or insider_df.empty:
-            return pd.DataFrame()
+        t = yf.Ticker(ticker)
+        return getattr(t, "insider_transactions", None)
+    except Exception:
+        return None
 
-        # --- ČIŠTĚNÍ DAT Z FINVIZU ---
-        # Finviz má sloupce: [Owner, Relationship, Date, Transaction, Cost, #Shares, Value ($), #Shares Total, SEC Form 4]
-        
-        # Přejmenování pro kompatibilitu s tvým skriptem
-        rename_map = {
-            'Date': 'Date',
-            'Transaction': 'Transaction',
-            'Relationship': 'Position',
-            'Value ($)': 'Value',
-            '#Shares': 'Shares',
-            'Cost': 'Price'
-        }
-        
-        # Flexibilní přejmenování (ignoruje, co tam není)
-        insider_df = insider_df.rename(columns=rename_map)
-        
-        # Filtrujeme jen sloupce, které potřebujeme
-        needed_cols = ['Date', 'Transaction', 'Position', 'Value']
-        
-        # Pokud chybí Value, zkusíme ji dopočítat
-        if 'Value' not in insider_df.columns and 'Shares' in insider_df.columns and 'Price' in insider_df.columns:
-             def clean_num(x):
-                 if isinstance(x, str): return pd.to_numeric(x.replace(',', ''), errors='coerce')
-                 return x
-             insider_df['Value'] = clean_num(insider_df['Shares']) * clean_num(insider_df['Price'])
-
-        # Finální formátování data (Finviz má "Feb 13", musíme přidat rok)
-        def parse_finviz_date(d_str):
-            try:
-                current_year = dt.datetime.now().year
-                return pd.to_datetime(f"{d_str} {current_year}", format="%b %d %Y")
-            except:
-                return pd.NaT
-
-        if 'Date' in insider_df.columns:
-            insider_df['Date'] = insider_df['Date'].apply(parse_finviz_date)
-        
-        # Čištění sloupce Value (odstranění čárek)
-        if 'Value' in insider_df.columns:
-             insider_df['Value'] = insider_df['Value'].astype(str).str.replace(',', '').apply(pd.to_numeric, errors='coerce')
-
-        return insider_df
-
-    except Exception as e:
-        print(f"Finviz Scraper Error: {e}")
-        return pd.DataFrame()
 
 # ============================================================================
 # METRICS & SCORING
@@ -1265,91 +1099,134 @@ def generate_ai_analyst_report_with_retry(ticker: str, company: str, info: Dict,
 
 
 def generate_ai_analyst_report(ticker: str, company: str, info: Dict, metrics: Dict, 
-                               dcf_fair_value: float, current_price: float, 
-                               scorecard: float, macro_events: List[Dict], insider_signal: Any = None) -> Dict:
+                             dcf_fair_value: float, current_price: float, 
+                             scorecard: float, macro_events: List[Dict], insider_signal: Any = None) -> Dict:
     """
-    Generuje hloubkovou asymetrickou analýzu pomocí Gemini.
+    Generuje analýzu pomocí Gemini (Verze: Ultimate Sector Logic).
+    Pokrývá: Tech, FinTech, Pharma, Reality, Komodity, Utility, Krypto a obecné firmy.
     """
+    # 0. Kontrola API klíče
     if not GEMINI_API_KEY:
-        return {"market_situation": "Chybí API klíč.", "verdict": "N/A"}
-
-    # 1. URČENÍ JAZYKA (Pojistka proti vietnamštině)
-    target_lang = "ČEŠTINĚ" if st.session_state.get("language") == "cz" else "ANGLIČTINĚ"
-
-    # 2. PŘÍPRAVA DAT
-    roic_val = calculate_roic(info) 
-    regime = detect_market_regime(fetch_price_history(ticker, "6mo"))
-    debt_ebitda = safe_div(info.get("totalDebt"), info.get("ebitda"))
-    fcf_yield_val = metrics.get("fcf_yield").value if metrics.get("fcf_yield") else 0
-
-    # 3. SESTAVENÍ PROMPTU (Tady byla ta chyba v odsazení)
-    context = f"""
-Jsi Seniorní Portfolio Manažer a Contrarian Analyst se specializací na ASYMETRICKÝ RISK/REWARD.
-DŮLEŽITÉ: Celou analýzu a všechny texty v JSON výstupu napiš v {target_lang}.
-
-VSTUPNÍ DATA:
-- Aktiva: {company} ({ticker}) | Sektor: {info.get('sector')} / {info.get('industry')}
-- Tržní cena: {fmt_money(current_price)} | Kalkulovaná Férovka (DCF): {fmt_money(dcf_fair_value)}
-- Metriky: P/E: {info.get('trailingPE')}, ROIC: {fmt_pct(roic_val)}, Net Debt/EBITDA: {fmt_num(debt_ebitda)}, FCF Yield: {fmt_pct(fcf_yield_val)}
-- Tržní Režim: {regime}
-- Makro události: {macro_events[:2]}
-
-TVŮJ ANALYTICKÝ RÁMEC (Chain-of-Thought):
-1. FUNDAMENTÁLNÍ PODLAHA: Je cena blízko hodnotě aktiv? Jak bezpečný je dluh?
-2. EMBEDDED OPTIONALITY: Má firma aktiva (data, patenty), která trh oceňuje nulou?
-3. RED TEAMING: Hraj roli Short Sellera. Proč tato firma za 2 roky ztratí 50 % hodnoty?
-4. ASYMETRIE: Je poměr mezi Downside a Upside alespoň 1:3?
-
-VÝSTUP POUZE JSON:
-{{
-  "asymmetry_score": (číslo 0-100),
-  "fundamental_floor": "Analýza bezpečnosti investice jednou větou.",
-  "red_team_warning": "BRUTÁLNĚ upřímná analýza největšího rizika - proč to nekoupit.",
-  "bull_case": ["Argument 1", "Argument 2"],
-  "bear_case": ["Riziko 1", "Riziko 2"],
-  "verdict": "STRONGBUY/BUY/HOLD/SELL/AVOID",
-  "wait_for_price": {current_price * 0.85 if current_price else 0},
-  "risk_reward_ratio": "Např. 1:4",
-  "reasoning_synthesis": "Konečný verdikt pro investiční komisi. Proč právě teď?",
-  "confidence": "HIGH/MEDIUM/LOW"
-}}
-"""
-
-    # 4. PARSOVÁNÍ JSONU
-    def _extract_json(text: str) -> Dict[str, Any]:
-        if not text: raise ValueError("Empty AI response")
-        cleaned = re.sub(r"```json\n?|```", "", str(text)).strip()
-        try:
-            return json.loads(cleaned)
-        except Exception:
-            m = re.search(r"\{[\s\S]*\}", cleaned)
-            if not m: raise
-            return json.loads(m.group(0))
-
-    # 5. VOLÁNÍ API
-    try:
-        raw_text = ""
-        try:
-            from google import genai as genai_new
-            client = genai_new.Client(api_key=GEMINI_API_KEY)
-            resp = client.models.generate_content(model=GEMINI_MODEL, contents=context)
-            raw_text = getattr(resp, "text", None) or str(resp)
-        except Exception:
-            import google.generativeai as genai_legacy
-            genai_legacy.configure(api_key=GEMINI_API_KEY)
-            model = genai_legacy.GenerativeModel(GEMINI_MODEL)
-            resp = model.generate_content(context)
-            raw_text = getattr(resp, "text", None) or str(resp)
-
-        return _extract_json(raw_text)
-
-    except Exception as e:
         return {
-            "market_situation": f"Chyba AI: {str(e)}", 
-            "bull_case": [], "bear_case": [], 
-            "verdict": "HOLD", "wait_for_price": current_price
+            "market_situation": "Chybí API klíč.",
+            "bull_case": [], "bear_case": [], "verdict": "N/A", 
+            "wait_for_price": 0.0, "reasoning": "Vložte Google AI Studio klíč.", "confidence": "LOW"
         }
-        
+
+    # 1. Normalizace vstupů (pro jistotu malá písmena)
+    sec = str(info.get("sector", "")).lower()
+    ind = str(info.get("industry", "")).lower()
+    tick = ticker.upper() # Pro detekci krypta podle tickeru
+
+    # 2. MASTER ROZCESTNÍK (8 Kategorií)
+
+    # A) KRYPTOMĚNY (BTC-USD, ETH-USD, COIN)
+    # Detekce: Ticker končí na -USD nebo sektor obsahuje 'crypto'
+    if "-USD" in tick or "crypto" in ind:
+        narrative_focus = """
+        ZAMĚŘENÍ (KRYPTO & DIGITAL ASSETS):
+        1. **Adopce:** Jde o reálné využití (ETF, platby), nebo jen spekulaci?
+        2. **Regulace:** Hrozí zákaz nebo přísná pravidla (SEC)?
+        3. **Cykly:** Jak se chová vůči halvingu a likviditě Fedu? (Ignoruj P/E a dividendy).
+        """
+
+    # B) ZDRAVOTNICTVÍ & BIOTECH (Pfizer, Eli Lilly)
+    elif "healthcare" in sec or "biotechnology" in ind or "drug" in ind:
+        narrative_focus = """
+        ZAMĚŘENÍ (HEALTHCARE):
+        1. **Patent Cliff:** Kdy vyprší patenty na klíčové léky?
+        2. **Pipeline:** Mají ve fázi 3 nové trháky, nebo je výzkum prázdný?
+        3. **Regulace cen:** Hrozí politický tlak na zlevnění léků?
+        """
+
+    # C) ENERGIE & KOMODITY (Exxon, Gold Miners)
+    elif "energy" in sec or "basic materials" in sec or "mining" in ind or "oil" in ind:
+        narrative_focus = """
+        ZAMĚŘENÍ (KOMODITY):
+        1. **Cena podkladu:** Je firma zisková, i když ropa/zlato klesne o 20%?
+        2. **Dividenda:** Je cash flow dost silné na udržení dividendy?
+        3. **Geopolitika:** Hrozí znárodnění dolů nebo uvalení windfall tax?
+        """
+
+    # D) UTILITY (ČEZ, Duke Energy, Voda)
+    elif "utilities" in sec:
+        narrative_focus = """
+        ZAMĚŘENÍ (UTILITY):
+        1. **Dluh:** Zvládají splácet obří dluh při aktuálních úrokových sazbách?
+        2. **Regulace:** Hrozí státní zásahy do cen energií (cenové stropy)?
+        3. **Dividenda:** Je to "Bond Proxy" (náhrada dluhopisu)? Je výnos bezpečný?
+        """
+
+    # E) REALITY & REITs (Realty Income, O)
+    elif "real estate" in sec or "reit" in ind:
+        narrative_focus = """
+        ZAMĚŘENÍ (REAL ESTATE / REITS):
+        1. **Refinancování:** Kdy jim končí fixace levných dluhů?
+        2. **Obsazenost:** Je poptávka po jejich typu budov (kanceláře = risk, sklady = boom)?
+        3. **FFO:** Hodnoť podle Funds From Operations, ne podle čistého zisku.
+        """
+
+    # F) FINTECH & BANKY (JPM, PayPal, Visa)
+    elif "financial" in sec or "bank" in ind or "payment" in ind:
+        narrative_focus = """
+        ZAMĚŘENÍ (FINANCE):
+        1. **Úvěrové riziko:** Rostou nesplácené půjčky?
+        2. **Disrupce (FinTech):** Ztrácí firma "moat" kvůli Apple Pay/Google Pay?
+        3. **Čistá úroková marže:** Jaký vliv mají sazby centrální banky?
+        """
+
+    # G) TECH & GROWTH (Nvidia, Google, Tesla)
+    elif "technology" in sec or "communication" in sec or "internet" in ind or "semiconductor" in ind:
+        narrative_focus = """
+        ZAMĚŘENÍ (BIG TECH & AI):
+        1. **AI Disrupce:**
+           - Je AI jejich produkt (Nvidia = Bull), nebo hrozba pro jejich produkt (Chegg/Adobe = Bear)?
+        2. **CapEx:** Utrácejí miliardy za čipy – vrátí se to?
+        3. **Valuace:** Je růst dostatečný pro ospravedlnění vysokého násobku?
+        """
+
+    # H) OSTATNÍ (Consumer Defensive, Retail, Průmysl)
+    else:
+        narrative_focus = """
+        ZAMĚŘENÍ (OBECNÉ / RETAIL / PRŮMYSL):
+        1. **Pricing Power:** Může firma přenést inflaci na zákazníka (zdražit)?
+        2. **Spotřebitel:** Slábne kupní síla zákazníků (recese)?
+        3. **Efektivita:** Jak zvládají náklady na práci a logistiku?
+        """
+
+    # 3. Sestavení Promptu
+    # Bezpečné získání P/E (pro krypto může chybět)
+    pe_val = metrics.get("marketCap").value if metrics.get("marketCap") else 'N/A'
+
+    context = f"""
+    Jsi brutálně upřímný seniorní hedge fond manažer. Analyzuj akcii {company} ({tick}).
+
+    ZÁKLADNÍ DATA:
+    - Cena: {fmt_money(current_price)}
+    - Férovka (DCF): {fmt_money(dcf_fair_value) if dcf_fair_value else 'N/A'} 
+    - Sektor: {sec} / {ind}
+    - P/E: {fmt_num(pe_val) if isinstance(pe_val, (int, float)) else 'N/A'}
+
+    MAKRO UDÁLOSTI:
+    {chr(10).join([f"- {e['date']}: {e['event']}" for e in macro_events[:2]])}
+
+    {narrative_focus}
+
+    INSTRUKCE:
+    Proveď HLOUBKOVOU, CYNICKOU analýzu. Každý bod v Bull a Bear case musí mít minimálně 2-3 věty vysvětlující hlubší souvislosti (např. vliv na marže, tržní podíl, cash flow). 
+    Nebuď alibista. Pokud je firma před krachem nebo disrupcí, napiš to.
+
+    VÝSTUP POUZE JSON:
+    {{
+      "market_situation": "Shrnutí sentimentu trhu jednou větou.",
+      "bull_case": ["Argument 1", "Argument 2"],
+      "bear_case": ["Riziko 1", "Riziko 2"],
+      "verdict": "BUY/HOLD/SELL",
+      "wait_for_price": <POVINNĚ konkrétní číslo - pokud předražené, navrhni 15% discount k fair value; pokud podhodnocené, navrhni aktuální cenu>,
+      "reasoning": "Syntéza pro a proti.",
+      "confidence": "HIGH/MEDIUM/LOW"
+    }}
+    """
 
 
     def _extract_json(text: str) -> Dict[str, Any]:
@@ -1589,7 +1466,7 @@ def get_advanced_verdict(
     warnings = []
     
     # Base verdict from scorecard
-    if scorecard >= 85:
+    if scorecard >= 75:
         base = "STRONG BUY"
         color = "#00ff88"
     elif scorecard >= 60:
@@ -1754,12 +1631,12 @@ def estimate_smart_params(info: Dict[str, Any], metrics: Dict[str, "Metric"]) ->
     # 4. STROP RŮSTU (Growth Cap) - Tady se krotí ty "brutální" čísla
     if is_mega_cap:
         # Giganti nemohou růst o 20% věčně -> Cap 12%
-        growth_cap = 0.08
-    elif is_large_cap:
         growth_cap = 0.12
+    elif is_large_cap:
+        growth_cap = 0.18
     else:
         # Malé dravé firmy mohou růst rychleji
-        growth_cap = 0.20
+        growth_cap = 0.25
         
     growth = max(0.03, min(growth_cap, raw_growth))
 
@@ -2170,7 +2047,7 @@ def main():
         
         # Advanced data
         ath = get_all_time_high(ticker)
-        insider_df = fetch_insider_transactions_fmp(ticker)
+        insider_df = fetch_insider_transactions(ticker)
         insider_signal = compute_insider_pro_signal(insider_df)
         
         # DCF calculations
@@ -2486,40 +2363,20 @@ def main():
     # ------------------------------------------------------------------------
     # TAB 3: AI Analyst Report
     # ------------------------------------------------------------------------
-# ------------------------------------------------------------------------
-    # TAB 3: AI Analyst Report (ASIMETRICKÁ VERZE 4.0)
-    # ------------------------------------------------------------------------
-   # ------------------------------------------------------------------------
-    # TAB 3: AI Analyst Report (ASIMETRICKÁ VERZE 4.0)
-    # ------------------------------------------------------------------------
     with tabs[2]:
-        st.markdown('<div class="section-header">🤖 AI Analytik & Asymetrie</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-header">🤖 AI Analytik - Hloubkový Report</div>', unsafe_allow_html=True)
         
-        # --- EDUKATIVNÍ LEGENDA ---
-        with st.expander("ℹ️ Co znamenají tyto metriky?", expanded=False):
-            st.markdown("""
-            ### ⚖️ Asymmetry Score
-            Měří tzv. **konvexitu** investice. Cílem je najít situace, kde je distribuce pravděpodobnosti "nakloněna" ve váš prospěch.
-            * **Vysoké skóre (70+):** Downside je omezen (např. vysokou hotovostí, aktivy), zatímco upside je otevřený.
-            * **Nízké skóre (0-30):** Riskujete 50 %, abyste vydělali 10 %. To je asymetrie, které se chceme vyhnout.
-
-            ### 🥊 Red Team Attack
-            Technika eliminace **konfirmačního zkreslení** (tendence hledat jen důkazy pro svůj názor). 
-            AI v tomto modulu simuluje roli *Short Sellera* nebo agresivního oponenta. Pokud vaše investiční teze přežije 
-            tento "útok" a rizika jsou akceptovatelná, je vaše rozhodnutí mnohem robustnější.
-            """)
-            
         if not GEMINI_API_KEY:
             st.warning("⚠️ **AI analýza není dostupná**")
-            st.info("Nastav GEMINI_API_KEY v secrets pro aktivaci AI analytika.")
+            st.info("Nastav GEMINI_API_KEY v kódu pro aktivaci AI analytika.")
         else:
-            # OPRAVENÉ TLAČÍTKO: Teď už skutečně volá funkci
-            if st.button("🚀 Vygenerovat Asymetrický Report", use_container_width=True, type="primary"):
+            st.info("🤖 Gemini AI je připraven vygenerovat hloubkovou analýzu")
+            
+            if st.button("🚀 Vygenerovat AI Report", use_container_width=True, type="primary"):
                 st.session_state.force_tab_label = "🤖 AI Analyst"
+                # Clear old report
                 st.session_state.ai_report_ticker = None
-                
-                with st.spinner("🧠 Seniorní manažer analyzuje asymetrii trhu..."):
-                    # Volání tvé retry funkce
+                with st.spinner("🧠 AI analytik přemýšlí... (může trvat 10-20s, retry logic aktivní)"):
                     ai_report = generate_ai_analyst_report_with_retry(
                         ticker=ticker,
                         company=company,
@@ -2528,75 +2385,55 @@ def main():
                         dcf_fair_value=fair_value_dcf,
                         current_price=current_price,
                         scorecard=scorecard,
-                        macro_events=MACRO_CALENDAR,
-                        insider_signal=insider_signal
+                        insider_signal=insider_signal,
+                        macro_events=MACRO_CALENDAR
                     )
                     
-                    # Uložení výsledku do session_state
                     st.session_state['ai_report'] = ai_report
                     st.session_state.ai_report_ticker = ticker
-                    st.rerun() # Refresh pro zobrazení výsledků
-
-            # --- ZOBRAZENÍ VÝSLEDKŮ ---
-            if 'ai_report' in st.session_state and st.session_state.ai_report_ticker == ticker:
+            
+            # Display report if available
+            if 'ai_report' in st.session_state:
                 report = st.session_state['ai_report']
                 
-                # 1. Gauge Chart (Ukazatel asymetrie)
-                import plotly.graph_objects as go
-                score = report.get("asymmetry_score", 50)
+                # Market situation
+                st.markdown("### 🌐 Tržní situace")
+                st.write(report.get('market_situation', 'N/A'))
                 
-                fig = go.Figure(go.Indicator(
-                    mode = "gauge+number",
-                    value = score,
-                    title = {'text': "Asymmetry Score", 'font': {'size': 20}},
-                    gauge = {
-                        'axis': {'range': [0, 100], 'tickwidth': 1},
-                        'bar': {'color': "#00ff88" if score > 70 else "#ffaa00"},
-                        'steps': [
-                            {'range': [0, 30], 'color': "rgba(255, 68, 68, 0.2)"},
-                            {'range': [30, 70], 'color': "rgba(255, 170, 0, 0.2)"},
-                            {'range': [70, 100], 'color': "rgba(0, 255, 136, 0.2)"}
-                        ],
-                        'threshold': {'line': {'color': "white", 'width': 4}, 'thickness': 0.75, 'value': score}
-                    }
-                ))
-                fig.update_layout(height=280, margin=dict(l=20, r=20, t=40, b=20), paper_bgcolor='rgba(0,0,0,0)', font={'color': "white"})
-                st.plotly_chart(fig, use_container_width=True)
-
-                # 2. RED TEAM WARNING BOX
-                st.markdown(f"""
-                    <div style="background-color: rgba(255, 68, 68, 0.1); border: 2px solid #ff4444; padding: 20px; border-radius: 10px; margin-bottom: 25px;">
-                        <h3 style="color: #ff4444; margin-top: 0; font-size: 1.2rem;">🚨 RED TEAM ATTACK</h3>
-                        <p style="font-style: italic; color: #ffcccc; margin-bottom: 0;">{report.get('red_team_warning', 'N/A')}</p>
-                    </div>
-                """, unsafe_allow_html=True)
-
-                # 3. Bull & Bear Case Sloupce
+                # Bull/Bear cases
                 col1, col2 = st.columns(2)
+                
                 with col1:
-                    st.markdown("### 🐂 Bull Case (Upside)")
+                    st.markdown("### 🐂 Bull Case")
                     for item in report.get('bull_case', []):
                         st.write(f"✅ {item}")
                 
                 with col2:
-                    st.markdown("### 🐻 Bear Case (Downside)")
+                    st.markdown("### 🐻 Bear Case")
                     for item in report.get('bear_case', []):
                         st.write(f"⚠️ {item}")
-
-                # 4. Syntéza a detaily
-                st.markdown("---")
-                st.markdown(f"**🛡️ Fundamentální podlaha:** {report.get('fundamental_floor', 'N/A')}")
-                st.info(f"**🎯 Strategická syntéza:** {report.get('reasoning_synthesis', 'N/A')}")
                 
-                # Spodní řada metrik
+                # Verdict
+                st.markdown("---")
+                st.markdown("### 🎯 Verdikt AI")
+                
                 v_col1, v_col2, v_col3 = st.columns(3)
+                
                 with v_col1:
-                    verdict = report.get('verdict', 'N/A')
-                    st.metric("Finální verdikt", verdict)
+                    ai_verdict = report.get('verdict', 'N/A')
+                    verdict_emoji = "🟢" if ai_verdict == "BUY" else ("🟡" if ai_verdict == "HOLD" else "🔴")
+                    st.metric("Doporučení", f"{verdict_emoji} {ai_verdict}")
+                
                 with v_col2:
-                    st.metric("Risk/Reward Ratio", report.get('risk_reward_ratio', 'N/A'))
+                    wait_price = report.get("marketCap")
+                    st.metric("Wait for Price", fmt_money(wait_price) if wait_price else "N/A")
+                
                 with v_col3:
                     st.metric("Confidence", report.get('confidence', 'N/A'))
+                
+                st.markdown("#### 💭 Zdůvodnění")
+                st.write(report.get('reasoning', 'N/A'))
+    
     # ------------------------------------------------------------------------
     # TAB 4: Peer Comparison
     # ------------------------------------------------------------------------
