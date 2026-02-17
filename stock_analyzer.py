@@ -381,23 +381,88 @@ def clamp(v: Optional[float], lo: float, hi: float) -> Optional[float]:
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_ticker_info(ticker: str) -> Dict[str, Any]:
-    """Fetch basic info from Yahoo Finance."""
+    """
+    Získá data o firmě. Primárně z FMP (pokud je klíč), jinak zkouší Yahoo.
+    Skládá data z Profile, Ratios a Key Metrics, aby nahradil yfinance.
+    """
+    info = {}
+    
+    # 1. CESTA: FINANCIAL MODELING PREP (Priorita - Spolehlivé)
+    if FMP_API_KEY:
+        try:
+            # A) PROFILE (Cena, Sektor, Popis, Beta)
+            url_profile = f"https://financialmodelingprep.com/api/v3/profile/{ticker}?apikey={FMP_API_KEY}"
+            prof_data = requests.get(url_profile).json()
+            
+            if prof_data and isinstance(prof_data, list):
+                p = prof_data[0]
+                info.update({
+                    'longName': p.get('companyName'),
+                    'symbol': p.get('symbol'),
+                    'sector': p.get('sector'),
+                    'industry': p.get('industry'),
+                    'longBusinessSummary': p.get('description'),
+                    'currentPrice': p.get('price'),
+                    'regularMarketPrice': p.get('price'),
+                    'marketCap': p.get('mktCap'),
+                    'beta': p.get('beta'),
+                    'currency': p.get('currency'),
+                    'country': p.get('country'),
+                    'website': p.get('website')
+                })
+
+                # B) RATIOS TTM (P/E, ROE, Margins) - Klíčové pro metriky
+                url_ratios = f"https://financialmodelingprep.com/api/v3/ratios-ttm/{ticker}?apikey={FMP_API_KEY}"
+                ratios_data = requests.get(url_ratios).json()
+                if ratios_data and isinstance(ratios_data, list):
+                    r = ratios_data[0]
+                    info.update({
+                        'trailingPE': r.get('peRatioTTM'),
+                        'returnOnEquity': r.get('returnOnEquityTTM'),
+                        'returnOnAssets': r.get('returnOnAssetsTTM'),
+                        'operatingMargins': r.get('operatingProfitMarginTTM'),
+                        'profitMargins': r.get('netProfitMarginTTM'),
+                        'grossMargins': r.get('grossProfitMarginTTM'),
+                        'priceToBook': r.get('priceToBookRatioTTM'),
+                        'priceToSalesTrailing12Months': r.get('priceToSalesRatioTTM'),
+                        'dividendYield': r.get('dividendYielTTM'), 
+                        'payoutRatio': r.get('payoutRatioTTM'),
+                        'currentRatio': r.get('currentRatioTTM'),
+                        'quickRatio': r.get('quickRatioTTM')
+                    })
+
+                # C) KEY METRICS TTM (Debt, Cash, EV/EBITDA, FCF)
+                url_metrics = f"https://financialmodelingprep.com/api/v3/key-metrics-ttm/{ticker}?apikey={FMP_API_KEY}"
+                metrics_data = requests.get(url_metrics).json()
+                if metrics_data and isinstance(metrics_data, list):
+                    m = metrics_data[0]
+                    info.update({
+                        'enterpriseToEbitda': m.get('enterpriseValueOverEBITDATTM'),
+                        'debtToEquity': m.get('debtToEquityTTM'),
+                        'totalCash': m.get('cashAndCashEquivalentsTTM'),
+                        'totalDebt': m.get('totalDebtTTM'),
+                        'freeCashflow': m.get('freeCashFlowTTM'),
+                        'operatingCashflow': m.get('operatingCashFlowTTM'),
+                        'revenueGrowth': m.get('revenueGrowthTTM')
+                    })
+                
+                # Pokud se povedlo načíst aspoň cenu, vracíme FMP data
+                if info.get('currentPrice'):
+                    return info
+
+        except Exception as e:
+            print(f"FMP Info Error: {e}")
+
+    # 2. CESTA: YAHOO FINANCE (Fallback - Nespolehlivé na Cloudu)
     try:
         t = yf.Ticker(ticker)
-        return t.info or {}
+        y_info = t.info
+        if y_info and y_info.get('regularMarketPrice'):
+            return y_info
     except Exception:
-        return {}
+        pass
 
-
-@st.cache_data(show_spinner=False, ttl=3600)
-def fetch_price_history(ticker: str, period: str = "1y") -> pd.DataFrame:
-    """Fetch historical price data."""
-    try:
-        t = yf.Ticker(ticker)
-        df = t.history(period=period, auto_adjust=False)
-        return df if not df.empty else pd.DataFrame()
-    except Exception:
-        return pd.DataFrame()
+    return info
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
