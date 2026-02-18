@@ -464,27 +464,120 @@ def calculate_piotroski_fscore(info: Dict[str, Any], income: pd.DataFrame, balan
     return score, breakdown
 
 
-def calculate_altman_zscore(info: Dict[str, Any]) -> Tuple[Optional[float], str]:
+def calculate_altman_zscore(
+    info: Dict[str, Any],
+    income: Optional[pd.DataFrame] = None,
+    balance: Optional[pd.DataFrame] = None,
+    market_cap: Optional[float] = None,
+) -> Tuple[Optional[float], str]:
     """
     Altman Z-Score: bankruptcy risk indicator.
-    > 2.99 = Safe, 1.81-2.99 = Grey Zone, < 1.81 = Distress
+    Classic (public manufacturing) model:
+      Z = 1.2*(WC/TA) + 1.4*(RE/TA) + 3.3*(EBIT/TA) + 0.6*(MVE/TL) + 1.0*(Sales/TA)
+
+    Poznámka:
+    - Pro banky/pojišťovny je model často nevhodný (jiná struktura rozvahy).
+    - yfinance `.info` často neobsahuje `totalAssets` a další klíče → primárně bereme z výkazů.
     """
     try:
-        total_assets = safe_float(info.get("totalAssets"))
-        if not total_assets or total_assets == 0:
+        sector = (info.get("sector") or "").lower()
+        industry = (info.get("industry") or "").lower()
+        if "financial" in sector or any(k in industry for k in ["bank", "insurance", "capital markets"]):
+            return None, "N/A pro finanční sektor"
+
+        def _df_value(df: Optional[pd.DataFrame], candidates: List[str]) -> Optional[float]:
+            if df is None or getattr(df, "empty", True):
+                return None
+            for c in candidates:
+                if c in df.index:
+                    try:
+                        return safe_float(df.loc[c].iloc[0])
+                    except Exception:
+                        continue
+            return None
+
+        missing = []
+
+        total_assets = safe_float(info.get("totalAssets")) or _df_value(balance, ["Total Assets"])
+        if not total_assets or total_assets <= 0:
             return None, "Data nedostupná"
 
-        working_capital = (safe_float(info.get("totalCurrentAssets")) or 0) - (safe_float(info.get("totalCurrentLiabilities")) or 0)
-        retained_earnings = safe_float(info.get("retainedEarnings") or info.get("retainedEarningsAccumulatedDeficit")) or 0
-        ebit = safe_float(info.get("ebit")) or (safe_float(info.get("ebitda")) or 0)
-        market_cap = safe_float(info.get("marketCap")) or 0
-        total_liabilities = (safe_float(info.get("totalDebt")) or 0)
-        revenue = safe_float(info.get("totalRevenue")) or 0
+        # Working capital = current assets - current liabilities
+        current_assets = safe_float(info.get("totalCurrentAssets")) or _df_value(
+            balance, ["Total Current Assets", "Current Assets"]
+        )
+        current_liab = safe_float(info.get("totalCurrentLiabilities")) or _df_value(
+            balance, ["Total Current Liabilities", "Current Liabilities"]
+        )
+        if current_assets is None or current_liab is None:
+            missing.append("WC")
+        working_capital = (current_assets or 0) - (current_liab or 0)
 
+        # Retained earnings
+        retained_earnings = (
+            safe_float(info.get("retainedEarnings") or info.get("retainedEarningsAccumulatedDeficit"))
+            or _df_value(balance, ["Retained Earnings", "Retained Earnings (Accumulated Deficit)"])
+            or 0
+        )
+        if retained_earnings == 0:
+            missing.append("RE")
+
+        # EBIT
+        ebit = safe_float(info.get("ebit")) or _df_value(income, ["Ebit", "EBIT", "Operating Income"]) or 0
+        if ebit == 0:
+            # fallback to EBITDA if nothing else
+            ebit = safe_float(info.get("ebitda")) or 0
+        if ebit == 0:
+            missing.append("EBIT")
+
+        # Revenue / Sales
+        revenue = safe_float(info.get("totalRevenue")) or _df_value(income, ["Total Revenue", "Operating Revenue"]) or 0
+        if revenue == 0:
+            missing.append("Sales")
+
+        # Market cap (MVE) - try to estimate if missing
+        if market_cap is None:
+            market_cap = safe_float(info.get("marketCap"))
+        if market_cap is None or market_cap == 0:
+            price = safe_float(info.get("regularMarketPrice") or info.get("currentPrice"))
+            shares = safe_float(info.get("sharesOutstanding"))
+            if price and shares:
+                market_cap = price * shares
+        market_cap = market_cap or 0
+        if market_cap == 0:
+            missing.append("MVE")
+
+        # Total liabilities (book) – NOT totalDebt
+        total_liabilities = safe_float(info.get("totalLiabilities")) or _df_value(
+            balance,
+            [
+                "Total Liab",
+                "Total Liabilities Net Minority Interest",
+                "Total Liabilities",
+            ],
+        )
+        if total_liabilities is None or total_liabilities <= 0:
+            # try assets - equity
+            total_equity = _df_value(
+                balance,
+                [
+                    "Total Stockholder Equity",
+                    "Stockholders Equity",
+                    "Total Equity Gross Minority Interest",
+                    "Total Equity",
+                ],
+            )
+            if total_equity is not None:
+                total_liabilities = total_assets - total_equity
+
+        if total_liabilities is None or total_liabilities <= 0:
+            return None, "Data nedostupná (liabilities)"
+
+        # Components
         x1 = working_capital / total_assets
         x2 = retained_earnings / total_assets
         x3 = ebit / total_assets
-        x4 = market_cap / max(total_liabilities, 1)
+        x4 = market_cap / total_liabilities
         x5 = revenue / total_assets
 
         z = 1.2 * x1 + 1.4 * x2 + 3.3 * x3 + 0.6 * x4 + 1.0 * x5
@@ -496,10 +589,13 @@ def calculate_altman_zscore(info: Dict[str, Any]) -> Tuple[Optional[float], str]
         else:
             zone = "🚨 Riziko bankrotu"
 
-        return round(z, 2), zone
+        if missing:
+            zone = f"{zone} (odhad: chybí {', '.join(sorted(set(missing)))})"
+
+        return round(float(z), 2), zone
+
     except Exception:
         return None, "Chyba výpočtu"
-
 
 def calculate_rsi(price_series: pd.Series, period: int = 14) -> Optional[float]:
     """Relative Strength Index (RSI)."""
@@ -3736,7 +3832,7 @@ def main():
         piotroski_score, piotroski_breakdown = calculate_piotroski_fscore(info, income, balance, cashflow)
 
         # Altman Z-Score
-        altman_z, altman_zone = calculate_altman_zscore(info)
+        altman_z, altman_zone = calculate_altman_zscore(info, income=income, balance=balance)
 
         # Graham Number
         graham_number = calculate_graham_number(info)
@@ -3916,7 +4012,7 @@ def main():
                           delta_color=pf_color)
             with adv2:
                 z_color = "normal" if altman_z and altman_z > 2.99 else ("inverse" if altman_z and altman_z < 1.81 else "off")
-                st.metric("Altman Z-Score", fmt_num(altman_z), delta=altman_zone.split(" ", 1)[-1] if altman_zone else None, delta_color=z_color, help=metric_help("Altman Z"))
+                st.metric("Altman Z-Score", fmt_num(altman_z), delta=(altman_zone.split(" ", 1)[-1] if (altman_zone and altman_zone[0] in "✅⚠️🚨ℹ️") else altman_zone) if altman_zone else None, delta_color=z_color, help=metric_help("Altman Z"))
             with adv3:
                 st.metric("Graham Number", fmt_money(graham_number), help=metric_help("Graham Number"),
                           delta=f"{((current_price/graham_number-1)*100):+.1f}% vs cena" if graham_number and current_price else None,
@@ -4380,9 +4476,17 @@ def main():
                 <div class="metric-delta">{altman_zone}</div>
             </div>
             """, unsafe_allow_html=True)
-            st.caption("Z > 2.99 = Bezpečná | 1.81 – 2.99 = Šedá zóna | Z < 1.81 = Riziko bankrotu")
-    
-    # ------------------------------------------------------------------------
+        else:
+            st.markdown(f"""
+            <div class="metric-card" style="border: 2px solid #444;">
+                <div class="metric-label">Z-Score</div>
+                <div class="metric-value" style="color: #aaa;">—</div>
+                <div class="metric-delta">{altman_zone or "Data nedostupná"}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        st.caption("Z > 2.99 = Bezpečná | 1.81 – 2.99 = Šedá zóna | Z < 1.81 = Riziko bankrotu")
+# ------------------------------------------------------------------------
     # TAB 6: DCF Valuation
     # ------------------------------------------------------------------------
     with tabs[5]:
